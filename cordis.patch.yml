@@ -24,7 +24,7 @@
 
         tabText: 随堂评
         fourStarCount: 2
-        varyFourStar: true
+        varyFourStar: false
 
         lateAnswer: 否
         dutyAnswer: 无职务
