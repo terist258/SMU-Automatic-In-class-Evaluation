@@ -98,6 +98,7 @@ smueval-bot-runNow   dryRun = true
 | `headless` | 是否隐藏窗口，默认 `false`（可见更像真人） |
 | `mode` | `browser`（默认，真实点击）/ `api`（直接调接口） |
 | `showStatusBar` | 是否在聊天输入框下方显示「南医大评课助手 · 每天 20:30」，默认 `true` |
+| `systemTask` | 是否注册 Windows 计划任务（DSH 不开也能跑），默认 `false` |
 
 `browserPath`、`profileDir`、`seedProfileFrom` 都可以留空，插件会自动探测。
 
@@ -115,6 +116,52 @@ smueval-bot-getStatus
 如果显示 `Token：⚠️ 已失效`：
 
 > 去**电脑版微信**里打开一次 `wjiaowu.smu.edu.cn`，下次运行会自动继承新 Token。
+
+**结果回执**：每次跑完（不管是在 DSH 里还是计划任务跑的），聊天输入框下方的状态条会显示
+「上次 ✅ 2 门（计划任务）」，配置面板底部也有完整结果。计划任务模式的结果同样会回流到 DSH。
+
+---
+
+## 不开 DSH 也能跑（Windows 计划任务）
+
+配置面板 →「界面」→ 打开 **注册 Windows 计划任务**。
+
+打开后插件会：
+
+1. 按「每天运行时间」在系统里建对应任务（`smueval-bot-2030` 这样一条一个时间点）
+2. 生成 `%LOCALAPPDATA%\smueval-bot\run.cmd`，内容就是「调用 DSH 自带的 node 跑 tools/run-once.mjs --jitter」
+3. **DSH 内的定时器主动让位**，避免同一天被两套定时各跑一遍
+
+计划任务在整点启动，脚本自己再随机等 `runJitterMinutes` 分钟，所以不会每天精确 20:30:00 提交。
+只支持 `mode: browser`（API 模式需要另外处理 Token）。
+
+产物都在 `%LOCALAPPDATA%\smueval-bot\`：
+
+| 文件 | 作用 |
+|---|---|
+| `config.json` | 插件导出的配置快照（CLI 只读，DSH 每次启动刷新） |
+| `run.cmd` | 计划任务实际调用的批处理 |
+| `run.log` | 计划任务模式的输出日志（排查用） |
+| `last-run.json` | 最近一次结果，DSH 打开时读它显示回执 |
+| `runs.jsonl` | 历史记录，一行一次 |
+
+想手动试一次（不会提交，只打印配置）：
+
+```
+"%LOCALAPPDATA%\smueval-bot\run.cmd" 的 node 行 + --check
+```
+
+或者直接：
+
+```
+node "<插件目录>\tools\run-once.mjs" --check     # 只读配置并打印
+node "<插件目录>\tools\run-once.mjs" --dry-run   # 真的走一遍页面，但不提交
+```
+
+取消：把「注册 Windows 计划任务」关掉，插件会删掉自己建的任务。
+
+> 注意：计划任务调用的是 **DSH 自带的 node**（`<DSH_HOME>\dsh-runtimes\...\node.exe`）。
+> 如果卸载了 DSH，任务会失效，记得同时关掉这个开关。
 
 ---
 

@@ -35,6 +35,11 @@ import z from "@deepseek-ai/schemastery";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+/** 本插件目录（run.cmd 里要写绝对路径给计划任务用）。 */
+const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 /** 记录「今天是否已经跑过」，用于开机补跑判断 */
 const STATE_FILE = path.join(os.homedir(), ".smueval-bot-state.json");
@@ -60,7 +65,220 @@ function ymd(d = new Date()) {
   return `${y}-${m}-${day}`;
 }
 
-// ---------- 通用工具 ----------
+// ---------- 与「计划任务 / 结果回执」共用的数据目录 ----------
+//
+// 计划任务跑在 DSH 外面，拿不到插件内存里的配置，所以由插件把配置导出成 JSON 快照，
+// 再由 CLI（tools/run-once.mjs）读它。反过来，CLI 每次跑完把结果写进 last-run.json，
+// DSH 打开时读回来，就能在状态条上显示"上次 ✅ 3 门"——这就是回执。
+
+const DATA_DIR = path.join(
+  process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"),
+  "smueval-bot"
+);
+/** 插件导出的配置快照（CLI 只读）。 */
+const CONFIG_SNAPSHOT = path.join(DATA_DIR, "config.json");
+/** 最近一次运行结果（DSH 与 CLI 都写这里）。 */
+const LAST_RUN_FILE = path.join(DATA_DIR, "last-run.json");
+/** 历史运行记录，一行一次。 */
+const HISTORY_FILE = path.join(DATA_DIR, "runs.jsonl");
+/** 计划任务实际调用的批处理，避免 schtasks 的命令行引号地狱。 */
+const RUNNER_CMD = path.join(DATA_DIR, "run.cmd");
+/** 计划任务模式的输出日志。 */
+const RUN_LOG = path.join(DATA_DIR, "run.log");
+/** 计划任务名前缀；每个运行时间一个任务，例如 smueval-bot-2030。 */
+const TASK_PREFIX = "smueval-bot";
+
+function ensureDataDir() {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  } catch {}
+}
+
+function readLastRun() {
+  try {
+    return JSON.parse(fs.readFileSync(LAST_RUN_FILE, "utf8")) || null;
+  } catch {
+    return null;
+  }
+}
+
+/** 记一次运行结果：DSH 内跑的、计划任务跑的，都写到同一份回执里。 */
+function recordRun(result, source) {
+  if (result === null || typeof result !== "object") return;
+  ensureDataDir();
+  const record = {
+    ok: !!result.ok,
+    dryRun: !!result.dryRun,
+    evaluated: result.evaluated || 0,
+    pending: result.pending || 0,
+    message: result.message || "",
+    tokenInvalid: !!result.tokenInvalid,
+    startedAt: result.startedAt || nowIso(),
+    finishedAt: result.finishedAt || nowIso(),
+    source: source || "dsh",
+    details: Array.isArray(result.details) ? result.details.slice(0, 50) : [],
+  };
+  try {
+    fs.writeFileSync(LAST_RUN_FILE, JSON.stringify(record, null, 2), "utf8");
+    fs.appendFileSync(HISTORY_FILE, JSON.stringify(record) + "\n", "utf8");
+  } catch {}
+}
+
+/** 把当前配置导出给 CLI；顺带记下已注册的计划任务名，便于下次清理。 */
+function exportConfigSnapshot(config, systemTask) {
+  ensureDataDir();
+  const snapshot = {
+    ...config,
+    __meta: {
+      exportedAt: nowIso(),
+      pluginDir: PLUGIN_DIR,
+      nodePath: process.execPath,
+      systemTasks: systemTask && Array.isArray(systemTask.tasks) ? systemTask.tasks : [],
+    },
+  };
+  try {
+    fs.writeFileSync(CONFIG_SNAPSHOT, JSON.stringify(snapshot, null, 2), "utf8");
+  } catch {}
+}
+
+// ---------- Windows 计划任务 ----------
+
+function hhmmToTaskName(hhmm) {
+  return `${TASK_PREFIX}-${String(hhmm).replace(/[^0-9]/g, "").padEnd(4, "0").slice(0, 4)}`;
+}
+
+function schtasks(args) {
+  return execFileSync("schtasks", args, {
+    windowsHide: true,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+let cachedNodePath;
+/**
+ * 找真正的 node 可执行文件。
+ *
+ * 关键坑：DSH 桌面端是 Electron，process.execPath 指向的是「DeepSeek Harness.exe」，
+ * 拿它去跑 .mjs 只会把应用再启动一次。所以这里优先用 DSH 自带的运行时 node。
+ */
+function findNodeExecutable() {
+  if (cachedNodePath !== undefined) return cachedNodePath;
+  const candidates = [];
+  const inElectron = !!(process.versions && process.versions.electron);
+  if (!inElectron) candidates.push(process.execPath);
+  for (const key of ["DSH_NODE", "DSH_NODE_PATH", "NODE_EXTERNAL"]) {
+    const value = process.env[key];
+    if (typeof value === "string" && value !== "") candidates.push(value);
+  }
+  const dshHome = process.env.DSH_HOME || path.join(os.homedir(), ".dsh");
+  const runtimes = path.join(dshHome, "dsh-runtimes");
+  try {
+    const entries = fs.readdirSync(runtimes, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      candidates.push(path.join(runtimes, entry.name, "dependencies", "node", "bin", "node.exe"));
+    }
+  } catch {}
+  candidates.push(path.join(process.env.ProgramFiles || "C:\\Program Files", "nodejs", "node.exe"));
+  for (const candidate of candidates) {
+    try {
+      if (candidate && fs.existsSync(candidate)) {
+        cachedNodePath = candidate;
+        return cachedNodePath;
+      }
+    } catch {}
+  }
+  try {
+    const found = execFileSync("where", ["node"], { windowsHide: true, encoding: "utf8" })
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line !== "");
+    if (found) {
+      cachedNodePath = found;
+      return cachedNodePath;
+    }
+  } catch {}
+  throw new Error("找不到 node.exe（计划任务需要它；可设置环境变量 DSH_NODE 指向 node.exe）");
+}
+
+/** 生成 run.cmd：把 node、脚本、日志重定向都写死在文件里，计划任务只调它。 */
+function writeRunnerCmd() {
+  ensureDataDir();
+  const nodePath = findNodeExecutable();
+  const script = path.join(PLUGIN_DIR, "tools", "run-once.mjs");
+  const body = [
+    "@echo off",
+    "chcp 65001 >nul",
+    `echo ==== %DATE% %TIME% ==== >> "${RUN_LOG}"`,
+    `"${nodePath}" "${script}" --jitter >> "${RUN_LOG}" 2>&1`,
+    "",
+  ].join("\r\n");
+  fs.writeFileSync(RUNNER_CMD, body, "utf8");
+  return { runner: RUNNER_CMD, script, nodePath };
+}
+
+/**
+ * 让系统计划任务与配置保持一致：systemTask=true 时按 runTimes 建/更新任务，
+ * false 时把上次登记的（以及按当前 runTimes 能推出来的）任务删掉。
+ * 全程不抛异常：DSH 装不了计划任务不该影响评课本身。
+ */
+function syncSystemTasks(config, log) {
+  const wanted = Array.isArray(config.runTimes) ? config.runTimes : DEFAULT_RUN_TIMES;
+  let known = [];
+  try {
+    const snapshot = JSON.parse(fs.readFileSync(CONFIG_SNAPSHOT, "utf8"));
+    if (snapshot && snapshot.__meta && Array.isArray(snapshot.__meta.systemTasks)) {
+      known = snapshot.__meta.systemTasks;
+    }
+  } catch {}
+  const state = { enabled: !!config.systemTask, tasks: [], error: "" };
+
+  if (!config.systemTask) {
+    const toDelete = new Set([...known, ...wanted.map(hhmmToTaskName)]);
+    for (const name of toDelete) {
+      try {
+        schtasks(["/Delete", "/F", "/TN", name]);
+        log("info", `已删除计划任务 ${name}`);
+      } catch {
+        // 本来就不存在：忽略
+      }
+    }
+    return state;
+  }
+
+  try {
+    writeRunnerCmd();
+  } catch (err) {
+    state.error = `写 run.cmd 失败：${err && err.message ? err.message : err}`;
+    return state;
+  }
+
+  const names = [];
+  for (const hhmm of wanted) {
+    const name = hhmmToTaskName(hhmm);
+    try {
+      schtasks(["/Create", "/F", "/SC", "DAILY", "/ST", String(hhmm), "/TN", name, "/TR", `"${RUNNER_CMD}"`]);
+      names.push(name);
+    } catch (err) {
+      const message = err && err.message ? err.message : String(err);
+      state.error = `创建 ${name} 失败：${message}`;
+      log("warn", state.error);
+    }
+  }
+  state.tasks = names;
+
+  // 去掉不再需要的老任务（比如改了运行时间）
+  for (const stale of known) {
+    if (names.includes(stale)) continue;
+    try {
+      schtasks(["/Delete", "/F", "/TN", stale]);
+      log("info", `已清理过期计划任务 ${stale}`);
+    } catch {}
+  }
+  return state;
+}
+
 
 function nowIso() {
   return new Date().toISOString();
@@ -274,7 +492,7 @@ async function submitSessionOnce(config, session) {
 
 // ---------- 主流程 ----------
 
-async function runEvaluation(config, log) {
+async function runEvaluationInner(config, log) {
   const startedAt = nowIso();
   const details = [];
   const result = {
@@ -427,6 +645,8 @@ const DEFAULTS = {
   userAgent: "",
   /** 是否在会话输入框下方显示状态条。 */
   showStatusBar: true,
+  /** 是否注册 Windows 计划任务（DSH 不开也能跑）。 */
+  systemTask: false,
 };
 
 // ---------- 配置端点（给插件页的配置面板读写用）----------
@@ -673,6 +893,10 @@ export const Config = z.object({
     .boolean()
     .default(true)
     .description("在会话输入框下方显示状态条（南医大评课助手 · 每天 20:30）"),
+  systemTask: z
+    .boolean()
+    .default(false)
+    .description("注册 Windows 计划任务：即使没打开 DSH，也会按上面的运行时间自动评课（仅 browser 模式）"),
 
   // 以下几项属于高级/排障用途，一般不用动
   edgePath: z.string().default("").description("（高级）等同 browserPath，保留兼容"),
@@ -686,6 +910,16 @@ export const Config = z.object({
   userAgent: z.string().default("").description("（高级）自定义 UA，留空用浏览器真实 UA"),
 });
 
+/** 跑一轮并把结果写进回执：DSH 内触发的和计划任务触发的共用同一份 last-run.json。 */
+async function runEvaluation(config, log, source = "dsh") {
+  const result = await runEvaluationInner(config, log);
+  try {
+    recordRun(result, source);
+  } catch {
+    // 回执写不出去不影响评课
+  }
+  return result;
+}
 // ---------- 插件入口 ----------
 
 export async function apply(ctx, rawConfig = {}) {
@@ -697,6 +931,25 @@ export async function apply(ctx, rawConfig = {}) {
   const log = (level, msg) => {
     console.log(`[${PLUGIN}] [${level}] ${msg}`);
   };
+
+  // 让系统计划任务跟上配置，并把配置导出给 CLI（失败不影响评课主流程）
+  let systemTaskState = { enabled: !!config.systemTask, tasks: [], error: "" };
+  try {
+    systemTaskState = syncSystemTasks(config, log);
+  } catch (err) {
+    systemTaskState = {
+      enabled: !!config.systemTask,
+      tasks: [],
+      error: String(err && err.message ? err.message : err),
+    };
+    log("warn", `计划任务同步失败：${systemTaskState.error}`);
+  }
+  if (systemTaskState.error) log("warn", `计划任务：${systemTaskState.error}`);
+  try {
+    exportConfigSnapshot(config, systemTaskState);
+  } catch {
+    // 快照写不出去只影响脱离 DSH 的模式
+  }
 
   // --- 定时任务 ---
   const doRun = async (reason) => {
@@ -731,6 +984,11 @@ export async function apply(ctx, rawConfig = {}) {
       scheduleDisposer = null;
     }
     if (!config.enabled) return;
+    // 交给 Windows 计划任务时不在这里排期：否则同一天会被两套定时各跑一遍。
+    if (config.systemTask) {
+      log("info", "已启用 Windows 计划任务，DSH 内定时器让位（避免同一天跑两遍）");
+      return;
+    }
     const runTimes =
       Array.isArray(config.runTimes) && config.runTimes.length ? config.runTimes : DEFAULT_RUN_TIMES;
     const jitterMinutes = Math.max(0, Number(config.runJitterMinutes) || 0);
@@ -750,6 +1008,8 @@ export async function apply(ctx, rawConfig = {}) {
   // 因为 lookbackDays 覆盖昨天，补跑时会把漏掉的昨天和今天一起评掉。
   const maybeCatchUp = () => {
     if (config.catchUpOnStart === false || !config.enabled) return;
+    // 计划任务模式下补跑也由系统那边负责（它错过会自己在下次登录后跑），这里不重复。
+    if (config.systemTask) return;
     const runTimes =
       Array.isArray(config.runTimes) && config.runTimes.length ? config.runTimes : DEFAULT_RUN_TIMES;
     const jitterMs = Math.max(0, Number(config.runJitterMinutes) || 0) * 60000;
@@ -995,12 +1255,24 @@ export async function apply(ctx, rawConfig = {}) {
                 packageName: PACKAGE_NAME,
                 patchPath,
                 writable: editor !== undefined,
-                state: {
-                  runCount: state.runCount || 0,
-                  lastRun: state.lastRun || "",
-                  lastResult: state.lastResult || {},
-                  tokenInvalid: !!state.tokenInvalid,
-                },
+                state: (() => {
+                  // 回执可能由计划任务写入（它跑在 DSH 外面），也可能是我这边刚跑的，
+                  // 谁的时间更新就显示谁。
+                  const persisted = readLastRun();
+                  const memory = state.lastResult && state.lastResult.finishedAt ? state.lastResult.finishedAt : "";
+                  const useFile = persisted !== null &&
+                    persisted !== undefined &&
+                    (memory === "" || Date.parse(String(persisted.finishedAt || persisted.startedAt || "")) >= Date.parse(memory));
+                  const last = useFile ? persisted : null;
+                  return {
+                    runCount: state.runCount || 0,
+                    lastRun: (last && (last.finishedAt || last.startedAt)) || state.lastRun || "",
+                    lastResult: last || state.lastResult || {},
+                    lastSource: (last && last.source) || (state.lastResult ? "dsh" : ""),
+                    tokenInvalid: last ? !!last.tokenInvalid : !!state.tokenInvalid,
+                    systemTask: systemTaskState,
+                  };
+                })(),
               },
             });
           }

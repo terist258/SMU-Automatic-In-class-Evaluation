@@ -71,6 +71,7 @@ window.__ModuleLoader__.load({
       { group: '浏览器', key: 'seedProfile', label: '同步本机浏览器资料', hint: '复制历史记录和 Cookie，避免「全新空 profile」特征。', type: 'bool' },
 
       { group: '界面', key: 'showStatusBar', label: '显示底部状态条', hint: '关掉后聊天输入框下方不再显示「南医大评课助手 · 每天 20:30」。', type: 'bool' },
+      { group: '界面', key: 'systemTask', label: '注册 Windows 计划任务', hint: '打开后即使没开 DSH 也会自动评课，DSH 内的定时器会主动让位，避免同一天跑两遍。计划任务在整点启动，再随机等 runJitterMinutes 分钟（仅 browser 模式）。', type: 'bool' },
     ];
 
     const GROUP_HINT = {
@@ -78,7 +79,7 @@ window.__ModuleLoader__.load({
       评分: '打几星、建议写不写、各道单选题选哪一项。',
       登录: 'Token 一般不用管，插件会自己去电脑版微信里找。',
       浏览器: '看得见的点击比接口调用更难被识别，默认就用浏览器。',
-      界面: '插件在 DSH 界面里露不露面。',
+      界面: '插件在 DSH 界面里露不露面、要不要脱离 DSH 运行。',
     };
 
     function textOf(spec, value) {
@@ -444,10 +445,23 @@ window.__ModuleLoader__.load({
 
       const st = data.state || {};
       const lastRun = st.lastRun ? new Date(st.lastRun).toLocaleString() : '—';
-      children.push(h('p', {
+      const lastResult = st.lastResult || {};
+      const sourceLabel = st.lastSource === 'system-task' ? '计划任务' : (st.lastSource === 'dsh' ? 'DSH' : '');
+      const verdict = lastResult.finishedAt
+        ? `${lastResult.ok ? '✅' : '❌'} ${lastResult.message || (lastResult.ok ? '完成' : '失败')}${sourceLabel ? `（${sourceLabel}）` : ''}`
+        : '还没跑过';
+      const tasks = st.systemTask && Array.isArray(st.systemTask.tasks) ? st.systemTask.tasks : [];
+      const taskLine = st.systemTask && st.systemTask.enabled
+        ? (tasks.length > 0 ? `计划任务已注册：${tasks.join('、')}` : `计划任务未注册${st.systemTask.error ? '：' + st.systemTask.error : ''}`)
+        : '计划任务：未启用（只在本机 DSH 打开时按时运行）';
+      children.push(h('div', {
         key: 'status',
-        style: { fontSize: 12, color: C.faint, marginTop: 4, lineHeight: 1.6 },
-      }, `已运行 ${st.runCount || 0} 次 · 上次 ${lastRun}${st.tokenInvalid ? ' · ⚠️ Token 已失效' : ''}`));
+        style: { fontSize: 12, color: C.faint, marginTop: 4, lineHeight: 1.7 },
+      }, [
+        h('div', { key: 'a' }, `已运行 ${st.runCount || 0} 次 · 上次 ${lastRun} · ${verdict}`),
+        h('div', { key: 'b' }, taskLine),
+        st.tokenInvalid ? h('div', { key: 'c', style: { color: C.danger } }, '⚠️ Token 已失效，去电脑版微信打开一次 wjiaowu.smu.edu.cn') : null,
+      ]));
 
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4, marginTop: 4 } }, children);
     }
@@ -459,11 +473,27 @@ window.__ModuleLoader__.load({
       if (values.showStatusBar === false) return null;
       const times = Array.isArray(values.runTimes) && values.runTimes.length > 0 ? values.runTimes.join(' / ') : null;
       const label = values.enabled === false ? '已暂停' : (times === null ? '已启用' : `每天 ${times}`);
+      const st = (loaded.data && loaded.data.state) || {};
+      const last = st.lastResult || {};
+      // 回执：谁跑的（DSH / 计划任务）+ 结果摘要，一眼能看出今天有没有成
+      let receipt = null;
+      if (last.finishedAt) {
+        const source = st.lastSource === 'system-task' ? '计划任务' : 'DSH';
+        receipt = last.ok
+          ? `上次 ✅ ${last.evaluated || 0} 门（${source}）`
+          : `上次 ❌ ${last.tokenInvalid ? 'Token 失效' : '失败'}（${source}）`;
+      }
       return h('div', {
         style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 10px', fontSize: 12, color: C.sub },
       }, [
         h('span', { key: 'n', style: { fontWeight: 600, color: C.text } }, '南医大评课助手'),
         h('span', { key: 's' }, label),
+        receipt === null
+          ? null
+          : h('span', {
+            key: 'r',
+            style: { color: last.ok ? C.ok : C.danger },
+          }, receipt),
       ]);
     }
 

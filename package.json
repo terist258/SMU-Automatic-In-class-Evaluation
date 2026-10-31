@@ -1,6 +1,6 @@
 {
   "name": "@local/smueval-bot",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "description": "南方医科大学教学服务平台「随堂评价」每日定时自动完成插件（DeepSeek Harness）",
@@ -29,6 +29,7 @@
     "locale/*.json",
     "icon.svg",
     "tools/test-client-apply.mjs",
+    "tools/run-once.mjs",
     "README.md"
   ],
   "dsh": {
