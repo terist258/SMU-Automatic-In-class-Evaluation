@@ -97,6 +97,7 @@ smueval-bot-runNow   dryRun = true
 | `dryRun` | 只点不提交，调试用 |
 | `headless` | 是否隐藏窗口，默认 `false`（可见更像真人） |
 | `mode` | `browser`（默认，真实点击）/ `api`（直接调接口） |
+| `showStatusBar` | 是否在聊天输入框下方显示「南医大评课助手 · 每天 20:30」，默认 `true` |
 
 `browserPath`、`profileDir`、`seedProfileFrom` 都可以留空，插件会自动探测。
 
