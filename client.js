@@ -14,6 +14,8 @@ window.__ModuleLoader__.load({
     const API_RUN = '/api/smueval-bot/run';
     /** 扫描/校验 Token 的端点。 */
     const API_TOKEN_SCAN = '/api/smueval-bot/token/scan';
+    /** 走微信浮窗换新 Token 的端点。 */
+    const API_TOKEN_WECHAT = '/api/smueval-bot/token/refresh-wechat';
     /** 登录页地址：复制到电脑版微信里点开，Token 就会落到本机。 */
     const LOGIN_URL = 'https://wjiaowu.smu.edu.cn/#/work';
     /** 保存成功后广播，让同页的状态条立刻跟着刷新。 */
@@ -287,6 +289,40 @@ window.__ModuleLoader__.load({
       const [tokenMsg, setTokenMsg] = React.useState('');
       const scanningRef = React.useRef(false);
       const scanRef = React.useRef(null);
+      // 「用微信浮窗刷新 Token」的忙碌态：这个动作要开关微信窗口，可能十几秒
+      const [wechatBusy, setWechatBusy] = React.useState(false);
+
+      /** 走微信浮窗换新 Token：唤醒微信 → 点手机图标 → OCR 找条目 → 点开 → 抓 Token。 */
+      const refreshViaWeChat = () => {
+        if (wechatBusy) return;
+        setWechatBusy(true);
+        setTokenMsg('正在操作微信：会弹出微信窗口、点开浮窗里的「教学服务平台系统」，请别动鼠标…');
+        requestJson(API_TOKEN_WECHAT, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: '{}',
+        })
+          .then((body) => {
+            if (body && body.ok === true) {
+              const data = (body.data || {});
+              setTokenMsg(data.changed
+                ? `已换到新 Token：${data.masked}，已写入配置`
+                : `Token 仍是有效的：${data.masked || '(同配置)'}，无需更换`);
+              notifyConfigChanged();
+              window.setTimeout(() => {
+                setWechatBusy(false);
+                loaded.reload();
+              }, 1500);
+              return;
+            }
+            setWechatBusy(false);
+            setTokenMsg((body && body.error) || '微信刷新失败');
+          })
+          .catch((cause) => {
+            setWechatBusy(false);
+            setTokenMsg('微信刷新失败：' + String((cause && cause.message) || cause));
+          });
+      };
 
       /** 扫一次所有 Token 来源；auto=true 表示监听模式下的静默轮询。 */
       const scanTokens = (auto) => {
@@ -615,6 +651,13 @@ window.__ModuleLoader__.load({
             },
             style: btnStyle(false, watchLeft > 0),
           }, watchLeft > 0 ? `监听中 ${watchLeft}s` : '监听 3 分钟（去微信点链接）'),
+          h('button', {
+            key: 'wx',
+            type: 'button',
+            disabled: scanning || watchLeft > 0 || wechatBusy,
+            onClick: () => refreshViaWeChat(),
+            style: btnStyle(true, scanning || watchLeft > 0 || wechatBusy),
+          }, wechatBusy ? '微信刷新中…' : '用微信浮窗刷新 Token'),
           h('button', {
             key: 'copy',
             type: 'button',

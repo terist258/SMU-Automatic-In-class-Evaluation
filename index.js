@@ -35,7 +35,7 @@ import z from "@deepseek-ai/schemastery";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 /** 本插件目录（run.cmd 里要写绝对路径给计划任务用）。 */
@@ -92,6 +92,7 @@ function ensureDataDir() {
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   } catch {}
+  return DATA_DIR;
 }
 
 function readLastRun() {
@@ -358,6 +359,46 @@ function maskToken(token) {
   return `${t.slice(0, 6)}…${t.slice(-4)}`;
 }
 
+/** 把微信窗口切到前台（Qt 窗口没有可定位控件，只能靠系统级窗口操作）。 */
+function focusWeChatWindow() {
+  const dir = ensureDataDir();
+  const scriptPath = path.join(dir, "focus-wechat.ps1");
+  const script = [
+    'Add-Type @"',
+    "using System;",
+    "using System.Runtime.InteropServices;",
+    "public class WxFocus {",
+    '  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string c, string n);',
+    '  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);',
+    '  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);',
+    '  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);',
+    "}",
+    '"@',
+    '$h = [WxFocus]::FindWindow("Qt51514QWindowIcon", "微信")',
+    "if ($h -eq [IntPtr]::Zero) { $h = [WxFocus]::FindWindow($null, \"微信\") }",
+    "if ($h -eq [IntPtr]::Zero) { Write-Output 'NOTFOUND'; exit 1 }",
+    "# 先按一下 Alt，解除前台锁定限制，SetForegroundWindow 才生效",
+    "[WxFocus]::keybd_event(0x12, 0, 0, [IntPtr]::Zero)",
+    "[WxFocus]::keybd_event(0x12, 0, 2, [IntPtr]::Zero)",
+    "[WxFocus]::ShowWindow($h, 9) | Out-Null",
+    "[WxFocus]::SetForegroundWindow($h) | Out-Null",
+    "Write-Output 'OK'",
+    "exit 0",
+  ].join("\r\n");
+  try {
+    fs.writeFileSync(scriptPath, script, "utf8");
+    const out = execFileSync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
+      { encoding: "utf8", timeout: 15000, windowsHide: true }
+    );
+    return { ok: String(out).includes("OK"), output: String(out).trim() };
+  } catch (err) {
+    const out = String((err && err.stdout) || "").trim();
+    return { ok: out.includes("OK"), output: out || String((err && err.message) || err) };
+  }
+}
+
 /**
  * 校验一个 Token 是否还有效：直接打 getIstoken（GET，header 带 token）。
  * 不启浏览器，几百毫秒就有结果，可以放心在面板里反复点。
@@ -396,9 +437,10 @@ async function validateTokenDetailed(apiBase, token) {
  * 这是「在微信里点一下链接 → 插件自动继承」的可用替代：
  * 微信端没法被程序驱动去开网址（见 README），但可以持续盯着它的本地存储。
  */
-async function scanTokenSources(config, log) {
+async function scanTokenSources(config, log, opts = {}) {
   const apiBase = config.apiBase || DEFAULT_API_BASE;
   const candidates = [];
+  const stopOnValid = opts.stopOnValid === true;
 
   let wechat = [];
   try {
@@ -418,10 +460,11 @@ async function scanTokenSources(config, log) {
       code: v.code,
       message: v.message,
     });
+    if (stopOnValid && v.valid) break;
   }
 
   const configToken = String(config.token || "");
-  if (configToken !== "") {
+  if (configToken !== "" && !(stopOnValid && candidates.some((c) => c.valid))) {
     const v = await validateTokenDetailed(apiBase, configToken);
     candidates.push({
       source: "config",
@@ -1026,7 +1069,7 @@ export async function apply(ctx, rawConfig = {}) {
   const config = { ...DEFAULTS, ...rawConfig };
   const disposers = [];
 
-  let state = { lastRun: null, lastResult: null, runCount: 0, tokenInvalid: false, running: false, scanning: false };
+  let state = { lastRun: null, lastResult: null, runCount: 0, tokenInvalid: false, running: false, scanning: false, refreshingToken: false };
 
   const log = (level, msg) => {
     console.log(`[${PLUGIN}] [${level}] ${msg}`);
@@ -1103,6 +1146,134 @@ export async function apply(ctx, rawConfig = {}) {
   scheduleNext();
 
   /**
+   * 把 Token 写进配置（走 configEditor，和面板保存是同一条路）。
+   * 写入会触发插件重载，所以调用方之后就不要再假设自己还活着。
+   */
+  const writeTokenToConfig = async (token) => {
+    const editor = ctx.get("configEditor");
+    if (editor === undefined) return false;
+    const entry = findOwnEntry(editor);
+    if (entry === undefined) return false;
+    await editor.edit(entry, (current) => ({ ...current, token }));
+    return true;
+  };
+
+  // ---- Token 失效后的自动监听 ----
+  // 微信没法被程序驱动去开网页（Qt 窗口无控件、无调试端口），
+  // 所以退一步：跑挂时自动盯住微信的本地存储，你只要在微信里点一次链接，这边直接接管。
+  const tokenWatch = { timer: null, until: 0, minutes: 0 };
+  const stopTokenWatch = () => {
+    if (tokenWatch.timer !== null) {
+      clearInterval(tokenWatch.timer);
+      tokenWatch.timer = null;
+    }
+    tokenWatch.until = 0;
+  };
+  disposers.push(stopTokenWatch);
+
+  const startTokenWatch = (minutes) => {
+    if (tokenWatch.timer !== null) return;
+    const mins = Math.max(1, Math.min(60, Number(minutes) || 10));
+    tokenWatch.minutes = mins;
+    tokenWatch.until = Date.now() + mins * 60000;
+    log("info", `Token 已失效 → 开始监听微信 ${mins} 分钟：在电脑版微信里点开链接登录一次，这边会自动写入新 Token`);
+    tokenWatch.timer = setInterval(async () => {
+      if (Date.now() > tokenWatch.until) {
+        stopTokenWatch();
+        log("warn", "监听结束：微信里始终没抓到有效 Token");
+        return;
+      }
+      try {
+        const scanned = await scanTokenSources(config, log, { stopOnValid: true });
+        const hit = scanned.best;
+        if (hit && hit.token && hit.token !== config.token) {
+          stopTokenWatch();
+          log("info", `抓到有效 Token（${hit.source === "wechat" ? "微信端" : "配置里"}）${hit.masked}，正在写入配置…`);
+          const written = await writeTokenToConfig(hit.token);
+          if (!written) log("warn", "没能写进配置（没有 configEditor），请到面板里点「用这个」");
+        }
+      } catch (err) {
+        log("warn", `监听扫描失败：${err && err.message ? err.message : err}`);
+      }
+    }, 20000);
+    if (typeof tokenWatch.timer.unref === "function") tokenWatch.timer.unref();
+  };
+
+  /**
+   * 跑一次微信浮窗刷新脚本（tools/wechat-token.ps1）。
+   * 脚本负责：唤醒微信（没开就启动并等扫码）→ 点手机图标 → OCR 找到「教学服务平台系统」
+   * → 点它 → 等内置浏览器把 OAuth 走完 → 关掉浏览器窗口。
+   */
+  const analyzeScriptOutput = (text) => {
+    const line = String(text || "")
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter((item) => item.startsWith("{") && item.endsWith("}"))
+      .pop();
+    if (!line) return null;
+    try {
+      return JSON.parse(line);
+    } catch {
+      return null;
+    }
+  };
+
+  // 用异步 execFile：这个脚本要开关微信窗口、跑 OCR，几十秒很正常，
+  // 用 execFileSync 会把整个 DSH 的事件循环卡住。
+  const execFileAsync = (file, args, options) =>
+    new Promise((resolve) => {
+      execFile(file, args, options, (err, stdout, stderr) => {
+        resolve({ err, stdout: String(stdout || ""), stderr: String(stderr || "") });
+      });
+    });
+
+  const runWeChatTokenScript = async () => {
+    const script = path.join(PLUGIN_DIR, "tools", "wechat-token.ps1");
+    if (!fs.existsSync(script)) return { ok: false, error: "缺少 tools/wechat-token.ps1" };
+    const { err, stdout } = await execFileAsync(
+      "powershell.exe",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", script],
+      { encoding: "utf8", timeout: 300000, windowsHide: true }
+    );
+    const parsed = analyzeScriptOutput(stdout);
+    if (parsed) return parsed;
+    if (err) return { ok: false, error: String((err && err.message) || err) };
+    return { ok: false, error: "脚本没有输出可解析的 JSON" };
+  };
+
+  /**
+   * 用微信浮窗刷新 Token。
+   * persist=true 时把新 Token 写回配置（会触发插件重载，所以评课进行中不要写）。
+   */
+  const refreshTokenViaWeChat = async (opts = {}) => {
+    if (state.refreshingToken) return { ok: false, error: "正在刷新 Token，等它跑完" };
+    state.refreshingToken = true;
+    try {
+      log("info", "开始用微信浮窗刷新 Token…");
+      const scripted = await runWeChatTokenScript();
+      if (!scripted.ok) {
+        log("warn", `微信刷新失败：${scripted.error || "未知原因"}`);
+        return { ok: false, error: scripted.error || "脚本执行失败", script: scripted };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1500)); // 等 leveldb 落盘
+      const scanned = await scanTokenSources(config, log, { stopOnValid: true });
+      const hit = scanned.best;
+      if (!hit) return { ok: false, error: "页面打开了，但没扫到有效 Token", script: scripted };
+      const changed = hit.token !== config.token;
+      if (changed) config.token = hit.token; // 先在本实例里生效，评课可立刻用
+      let persisted = false;
+      if (opts.persist === true && changed) persisted = await writeTokenToConfig(hit.token);
+      log(
+        "info",
+        `微信刷新成功：${hit.masked}${changed ? "（新 Token）" : "（与配置相同）"}${persisted ? "，已写入配置" : ""}`
+      );
+      return { ok: true, masked: hit.masked, changed, persisted, script: scripted };
+    } finally {
+      state.refreshingToken = false;
+    }
+  };
+
+  /**
    * 跑一轮，供「工具 / 配置面板的立即执行 / HTTP 端点」共用。
    * 同一时间只允许跑一次：两个浏览器自动化并发会互相抢 profile 和页面焦点。
    */
@@ -1124,11 +1295,24 @@ export async function apply(ctx, rawConfig = {}) {
     state.running = true;
     try {
       const cfg = { ...config, dryRun: dryRun === undefined || dryRun === null ? config.dryRun : !!dryRun };
-      const result = await runEvaluation(cfg, log);
+      let result = await runEvaluation(cfg, log);
+      // Token 失效 → 先用微信浮窗自动换新 Token（不写配置，避免中途重载打断），再补跑一次
+      if (result.tokenInvalid && dryRun !== true) {
+        log("warn", "Token 失效，尝试用微信浮窗自动刷新…");
+        const refreshed = await refreshTokenViaWeChat({ persist: false });
+        if (refreshed.ok) {
+          result = await runEvaluation({ ...config, dryRun: cfg.dryRun }, log);
+          // 评课跑完再把新 Token 落盘（这时重载不会打断任何东西）
+          if (refreshed.changed) await writeTokenToConfig(config.token);
+        } else {
+          startTokenWatch(10);
+        }
+      }
       state.runCount += 1;
       state.lastRun = result.startedAt;
       state.lastResult = result;
       state.tokenInvalid = !!result.tokenInvalid;
+      if (result.tokenInvalid) startTokenWatch(10);
       return result;
     } finally {
       state.running = false;
@@ -1397,10 +1581,26 @@ export async function apply(ctx, rawConfig = {}) {
                     lastSource: (last && last.source) || (state.lastResult ? "dsh" : ""),
                     tokenInvalid: last ? !!last.tokenInvalid : !!state.tokenInvalid,
                     systemTask: systemTaskState,
+                    tokenWatch:
+                      tokenWatch.timer === null
+                        ? { active: false, secondsLeft: 0 }
+                        : {
+                            active: true,
+                            secondsLeft: Math.max(0, Math.round((tokenWatch.until - Date.now()) / 1000)),
+                          },
                   };
                 })(),
               },
             });
+          }
+
+          // 用微信浮窗刷新 Token：面板「刷新 Token」按钮调这里。
+          if (req.method === "POST" && url.pathname === `${WEB_ROUTE}/token/refresh-wechat`) {
+            if (state.running) {
+              return sendJson(res, 409, { ok: false, error: "正在评课，等它结束再刷新 Token" });
+            }
+            const result = await refreshTokenViaWeChat({ persist: true });
+            return sendJson(res, result.ok ? 200 : 502, { ok: result.ok, data: result, error: result.ok ? undefined : result.error });
           }
 
           // 扫描所有 Token 来源并校验：面板「扫描 Token / 监听微信」调这里。
