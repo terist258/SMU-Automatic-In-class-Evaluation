@@ -1073,50 +1073,108 @@ export async function runCourseRun(config, log) {
         await page.locator(".van-rate").first().waitFor({ state: "visible", timeout: 20000 });
 
         // 1) 星题：全部「非常赞同」（第 5 档）
+        // 页面滚动/固定底栏会挡点击，所以每题点完校验 aria-checked，没打上就重试
         const rateCount = await page.locator(".van-rate").count();
+        let starMiss = 0;
         for (let i = 0; i < rateCount; i++) {
-          const item = page.locator(".van-rate").nth(i).locator(".van-rate__item").nth(4);
-          await humanClick(page, item, log);
-          await sleep(rand(500, 1400));
+          const rate = page.locator(".van-rate").nth(i);
+          const item = rate.locator(".van-rate__item").nth(4);
+          let done = false;
+          for (let attempt = 1; attempt <= 3 && !done; attempt++) {
+            try {
+              await item.scrollIntoViewIfNeeded({ timeout: 5000 });
+              await humanClick(page, item, log);
+              await sleep(rand(250, 600));
+              const checked = await rate
+                .locator(".van-rate__item")
+                .nth(4)
+                .getAttribute("aria-checked")
+                .catch(() => null);
+              done = checked === "true";
+              if (!done && attempt === 3) {
+                // 兜底：直接触发元素点击（不移动鼠标，避免又点偏）
+                await rate.locator(".van-rate__item").nth(4).evaluate((el) => el.click()).catch(() => {});
+                await sleep(300);
+                const again = await rate
+                  .locator(".van-rate__item")
+                  .nth(4)
+                  .getAttribute("aria-checked")
+                  .catch(() => null);
+                done = again === "true";
+              }
+            } catch {
+              done = false;
+            }
+          }
+          if (!done) starMiss += 1;
+          await sleep(rand(150, 400));
         }
-        log("info", `    打星 ${rateCount} 题（全五星）`);
+        log("info", `    打星 ${rateCount} 题（全五星）${starMiss > 0 ? `，其中 ${starMiss} 题没打上` : ""}`);
 
-        // 2) 单选题
+        // 2) 单选题：点完必须校验是否真选上（滚动/固定栏会挡住点击），没选上重试
         const groups = await page.evaluate(() =>
           [...document.querySelectorAll(".van-radio-group")].map((g) => ({
             opts: [...g.querySelectorAll(".van-radio")].map((r) => r.innerText.trim()),
           }))
         );
         const wantByGroup = ["无职务", "按要求完成了学习", "课程学时30%以内"];
+        const readPicked = (idx) =>
+          page.evaluate((i) => {
+            const g = document.querySelectorAll(".van-radio-group")[i];
+            if (!g) return "";
+            const radio = [...g.querySelectorAll(".van-radio")].find((r) => {
+              const icon = r.querySelector(".van-radio__icon");
+              return icon && /checked/.test(icon.className || "");
+            });
+            return radio ? (radio.innerText || "").trim() : "";
+          }, idx);
+
         for (let i = 0; i < groups.length; i++) {
           const opts = groups[i].opts || [];
           const want = wantByGroup.find((w) => opts.includes(w)) || opts[opts.length - 1];
           if (!want) continue;
-          const opt = page.locator(".van-radio-group").nth(i).locator(".van-radio", { hasText: want }).first();
-          if ((await opt.count()) > 0) {
-            await humanClick(page, opt, log);
-            await sleep(rand(300, 800));
+          const group = page.locator(".van-radio-group").nth(i);
+          const opt = group.locator(".van-radio", { hasText: want }).first();
+          let picked = "";
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+              await opt.scrollIntoViewIfNeeded({ timeout: 5000 });
+              await humanClick(page, opt, log);
+              await sleep(rand(300, 700));
+              picked = await readPicked(i);
+              if (picked === want) break;
+              if (attempt === 3) {
+                await opt.evaluate((el) => el.click()).catch(() => {});
+                await sleep(300);
+                picked = await readPicked(i);
+              }
+            } catch {
+              picked = "";
+            }
           }
+          log("info", `    单选 ${i + 1}：${picked || "未选上（" + want + "）"}`);
         }
 
-        // 3) 自主学习比例（不是 radio 时是选择器）
-        const hasRatioRadio = groups.some((g) => (g.opts || []).some((o) => o.includes("课程学时")));
-        if (!hasRatioRadio) {
-          const cell = page.locator(".van-cell", { hasText: "自主学习的比例" }).first();
-          if ((await cell.count()) > 0) {
-            await humanClick(page, cell, log);
-            await sleep(rand(1200, 2200));
-            const opt = page.locator(".van-picker-column__item, .van-action-sheet__item").filter({ hasText: "课程学时30%以内" }).first();
+        // 3) 自主学习比例：这是个 van-dropdown-menu（下拉菜单），点开后是 van-cell 选项
+        const ratioDrop = page.locator(".van-dropdown-menu__item").first();
+        if ((await ratioDrop.count()) > 0) {
+          try {
+            await humanClick(page, ratioDrop, log);
+            await sleep(rand(800, 1500));
+            const opt = page.locator(".van-dropdown-item__option", { hasText: "课程学时30%以内" }).first();
             if ((await opt.count()) > 0) {
               await humanClick(page, opt, log);
-              await sleep(rand(400, 900));
-            }
-            const confirm = page.locator(".van-picker__confirm").first();
-            if ((await confirm.count()) > 0) {
-              await humanClick(page, confirm, log);
               await sleep(rand(600, 1200));
+              const shown = await page.evaluate(() => {
+                const el = document.querySelector(".van-dropdown-menu__title");
+                return el ? (el.innerText || "").trim() : "";
+              });
+              log("info", `    已选自主学习比例：${shown || "课程学时30%以内"}`);
+            } else {
+              log("warn", "    下拉菜单里没找到「课程学时30%以内」");
             }
-            log("info", "    已选自主学习比例：课程学时30%以内");
+          } catch (err) {
+            log("warn", `    自主学习比例选择失败：${err.message}`);
           }
         }
 

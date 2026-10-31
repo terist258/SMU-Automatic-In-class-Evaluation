@@ -214,7 +214,7 @@ node "<插件目录>\tools\run-once.mjs" --test-notify
 - 「你担任的职务」→ **无职务**
 - 「本学期是否达到课程学习要求」→ **按要求完成了学习**
 - 「其他意见或建议」→ 填一句模板；「优秀教师姓名」→ 留空（平台说可不填）
-- 第 15 题「自主学习比例」: **平台上没有渲染任何控件**，学生也答不了，跳过（与真人操作一致）
+- 第 15 题「自主学习比例」→ 下拉菜单选 **课程学时30%以内**（这个控件是 `van-dropdown-menu`，要点击展开再选，之前误判成"没有控件"）
 
 接口（逆向出来的，供参考）：列表 `POST /appapi/Studentpjwj/course`，表单 `POST /appapi/Studentpjwj/pjCourse`，提交 `POST /appapi/Studentpjwj/saveCoursePj`。
 

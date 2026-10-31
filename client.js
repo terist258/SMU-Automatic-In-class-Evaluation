@@ -331,6 +331,8 @@ window.__ModuleLoader__.load({
       const [tokenMsg, setTokenMsg] = React.useState('');
       const scanningRef = React.useRef(false);
       const scanRef = React.useRef(null);
+      // 二级页签：把配置按用途分类，避免一长条堆在一起
+      const [activeTab, setActiveTab] = React.useState('op');
       // 期末评课程：独立按钮触发，平时自动流程不碰
       const [courseBusy, setCourseBusy] = React.useState(false);
       const [courseMsg, setCourseMsg] = React.useState('');
@@ -627,6 +629,33 @@ window.__ModuleLoader__.load({
       }
 
       const children = [];
+      // ---- 二级页签 ----
+      const TABS = [
+        { key: 'op', label: '操作' },
+        { key: 'timing', label: '定时' },
+        { key: 'token', label: 'Token' },
+        { key: 'course', label: '评课程' },
+        { key: 'advanced', label: '高级' },
+      ];
+      children.push(h('div', {
+        key: 'tabs',
+        style: { display: 'flex', gap: 6, marginBottom: 10, flexWrap: 'wrap' },
+      }, TABS.map((tab) => h('button', {
+        key: tab.key,
+        type: 'button',
+        onClick: () => setActiveTab(tab.key),
+        style: {
+          padding: '5px 14px',
+          fontSize: 12,
+          borderRadius: 999,
+          border: `1px solid ${activeTab === tab.key ? C.text : C.border}`,
+          background: activeTab === tab.key ? C.text : 'transparent',
+          color: activeTab === tab.key ? C.surface : C.sub,
+          fontWeight: activeTab === tab.key ? 600 : 400,
+          cursor: 'pointer',
+        },
+      }, tab.label))));
+
       // 「立即执行」放在最上面：这是最常用的动作，不用先滚到底部
       children.push(h('section', {
         key: 'actions-run',
@@ -917,6 +946,19 @@ window.__ModuleLoader__.load({
 
       // colorScheme 会继承：把它放在根容器上，input/select/滚动条这些原生控件
       // 就会跟着 DSH 的深浅色走，不会出现"深色主题里输入框还是白的"这种冲突。
+      // ---- 按页签过滤：设置类分组靠 key（分组名）映射，动作类靠固定 key ----
+      const GROUP_TAB = { 运行: 'timing', 界面: 'timing', 登录: 'token', 评分: 'advanced', 浏览器: 'advanced' };
+      const KEY_TAB = { 'actions-run': 'op', 'token-box': 'token', 'course-box': 'course' };
+      const ALWAYS = new Set(['tabs', 'actions', 'status', 'readonly']);
+      const visibleChildren = children.filter((node) => {
+        const key = node && node.key;
+        if (!key) return true;
+        if (ALWAYS.has(key)) return true;
+        if (KEY_TAB[key]) return activeTab === KEY_TAB[key];
+        if (GROUP_TAB[key]) return activeTab === GROUP_TAB[key];
+        return true;
+      });
+
       return h('div', {
         style: {
           display: 'flex',
@@ -925,7 +967,7 @@ window.__ModuleLoader__.load({
           marginTop: 4,
           colorScheme: dark ? 'dark' : 'light',
         },
-      }, children);
+      }, visibleChildren);
     }
 
     /** 会话输入框下方的状态条；配置里关掉 showStatusBar 就整个不渲染。 */
