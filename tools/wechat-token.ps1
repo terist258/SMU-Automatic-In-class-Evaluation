@@ -252,9 +252,12 @@ try {
   }
   if ($hit -eq $null) {
     [WxTk]::TopMost($panel, $false) | Out-Null
+    $seen = (($ocr.Lines | ForEach-Object { ($_.Text -replace "\s", "") }) -join " | ")
     Out-Json @{
       ok = $false
-      error = ("浮窗里没找到含「" + $Keyword + "」的条目（OCR：" + (($ocr.Lines | ForEach-Object { ($_.Text -replace "\s", "") }) -join " | ") + "）")
+      error = ("浮窗里没找到含「" + $Keyword + "」的条目。" +
+        "请先在手机微信里从「南医大教学」→底部菜单「本科」进入教务系统，点右上角「···」→「浮窗」；" +
+        "之后电脑版微信的浮窗面板里就会出现「教学服务平台系统」。当前面板识别到：" + $seen)
       shot = $shot
     }
     exit 0
