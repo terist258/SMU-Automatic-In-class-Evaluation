@@ -621,9 +621,12 @@ window.__ModuleLoader__.load({
               padding: '6px 16px',
               fontSize: 13,
               borderRadius: 6,
-              border: `1px solid ${C.border}`,
-              background: running ? C.surfaceMuted : C.link,
-              color: running ? C.sub : '#fff',
+              border: `1px solid ${running ? C.border : C.text}`,
+              // 主按钮用「正文色当底、表面色当字」的反色方案：
+              // 这两个 token 本来就是为对比配的一对，深浅主题都保证看得清，
+              // 不会像 brand-primary 那样在深色主题里变成一片糊。
+              background: running ? C.surfaceMuted : C.text,
+              color: running ? C.sub : C.surface,
               cursor: running ? 'default' : 'pointer',
             },
           }, running ? '执行中…' : '立即执行'),
@@ -656,9 +659,11 @@ window.__ModuleLoader__.load({
         padding: '6px 12px',
         fontSize: 13,
         borderRadius: 6,
-        border: `1px solid ${C.border}`,
-        background: disabled ? C.surfaceMuted : (primary ? C.link : 'transparent'),
-        color: disabled ? C.faint : (primary ? '#fff' : C.sub),
+        // 主按钮反色（正文色做底、表面色做字），渲染结果在深浅主题下都是高对比
+        border: `1px solid ${disabled ? C.border : primary ? C.text : C.borderStrong}`,
+        background: disabled ? C.surfaceMuted : (primary ? C.text : 'transparent'),
+        color: disabled ? C.faint : (primary ? C.surface : C.sub),
+        fontWeight: primary ? 600 : 400,
         cursor: disabled ? 'default' : 'pointer',
       });
       children.push(h('section', {
@@ -782,9 +787,10 @@ window.__ModuleLoader__.load({
             padding: '6px 16px',
             fontSize: 13,
             borderRadius: 6,
-            border: `1px solid ${C.border}`,
-            background: dirtyKeys.length === 0 ? C.surfaceMuted : C.link,
-            color: dirtyKeys.length === 0 ? C.sub : '#fff',
+            border: `1px solid ${dirtyKeys.length === 0 ? C.border : C.text}`,
+            background: dirtyKeys.length === 0 ? C.surfaceMuted : C.text,
+            color: dirtyKeys.length === 0 ? C.sub : C.surface,
+            fontWeight: dirtyKeys.length === 0 ? 400 : 600,
             cursor: disabled || dirtyKeys.length === 0 ? 'default' : 'pointer',
           },
         }, phase === 'saving' ? '保存中…' : (dirtyKeys.length === 0 ? '保存' : `保存 ${dirtyKeys.length} 项`)),
