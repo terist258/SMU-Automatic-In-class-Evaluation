@@ -12,6 +12,10 @@ window.__ModuleLoader__.load({
     const API = '/api/smueval-bot/config';
     /** 立即执行一轮的端点。 */
     const API_RUN = '/api/smueval-bot/run';
+    /** 扫描/校验 Token 的端点。 */
+    const API_TOKEN_SCAN = '/api/smueval-bot/token/scan';
+    /** 登录页地址：复制到电脑版微信里点开，Token 就会落到本机。 */
+    const LOGIN_URL = 'https://wjiaowu.smu.edu.cn/#/work';
     /** 保存成功后广播，让同页的状态条立刻跟着刷新。 */
     const CONFIG_EVENT = 'smueval-bot:config-changed';
     /** 后台跑完（计划任务/定时器）时的轮询间隔：够及时，也不至于一直敲本机端点。 */
@@ -276,6 +280,98 @@ window.__ModuleLoader__.load({
       const [runPending, setRunPending] = React.useState(false);
       const runStartedAt = React.useRef('');
       const lastConfigJson = React.useRef('');
+      // Token 扫描 / 监听微信的状态
+      const [scanData, setScanData] = React.useState(null);
+      const [scanning, setScanning] = React.useState(false);
+      const [watchLeft, setWatchLeft] = React.useState(0);
+      const [tokenMsg, setTokenMsg] = React.useState('');
+      const scanningRef = React.useRef(false);
+      const scanRef = React.useRef(null);
+
+      /** 扫一次所有 Token 来源；auto=true 表示监听模式下的静默轮询。 */
+      const scanTokens = (auto) => {
+        if (scanningRef.current) return;
+        scanningRef.current = true;
+        setScanning(true);
+        if (auto !== true) setTokenMsg('');
+        requestJson(API_TOKEN_SCAN, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: '{}',
+        })
+          .then((body) => {
+            scanningRef.current = false;
+            setScanning(false);
+            if (!body || body.ok !== true) {
+              setTokenMsg((body && body.error) || '扫描失败');
+              return;
+            }
+            const data = body.data || {};
+            setScanData(data);
+            const hit = (data.candidates || []).find((item) => item.valid);
+            if (hit) {
+              setWatchLeft(0);
+              setTokenMsg(`找到有效 Token（${hit.source === 'wechat' ? '微信端' : '配置里'}）：${hit.masked}`);
+              if (auto === true) saveTokenRef.current(hit.token, hit.source === 'wechat' ? '微信端' : '配置里');
+            } else if (auto !== true) {
+              setTokenMsg(data.wechatCount
+                ? `微信里找到 ${data.wechatCount} 个候选，但都已过期。请在电脑版微信里重新点开链接登录一次。`
+                : '微信里没找到 wjiaowu 的记录。请在电脑版微信里点开链接登录一次。');
+            }
+          })
+          .catch((cause) => {
+            scanningRef.current = false;
+            setScanning(false);
+            if (auto !== true) setTokenMsg('扫描失败：' + String((cause && cause.message) || cause));
+          });
+      };
+      scanRef.current = scanTokens;
+
+      /** 把某个 Token 写进配置（走同一个 /config 端点，插件会自动重载）。 */
+      const saveToken = (token, label) => {
+        setTokenMsg('正在写入 Token…');
+        requestJson(API, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ patch: { token } }),
+        })
+          .then((body) => {
+            if (body && body.ok === true) {
+              setTokenMsg(`已写入配置（来源：${label}），插件正在重载…`);
+              notifyConfigChanged();
+              window.setTimeout(() => loaded.reload(), 1600);
+              return;
+            }
+            setTokenMsg((body && body.error) || '写入失败');
+          })
+          .catch(() => {
+            setTokenMsg('已提交，插件正在重载…');
+            notifyConfigChanged();
+            window.setTimeout(() => loaded.reload(), 1600);
+          });
+      };
+      const saveTokenRef = React.useRef(saveToken);
+      saveTokenRef.current = saveToken;
+
+      const copyLoginLink = () => {
+        const done = () =>
+          setTokenMsg('链接已复制。打开电脑版微信 → 文件传输助手 → 粘贴发送 → 点开并登录，然后点「监听 3 分钟」。');
+        try {
+          navigator.clipboard.writeText(LOGIN_URL).then(done, () => setTokenMsg(`复制失败，手动复制：${LOGIN_URL}`));
+        } catch {
+          setTokenMsg(`手动复制：${LOGIN_URL}`);
+        }
+      };
+
+      // 监听模式：每 3 秒扫一次，用户去微信点链接，插件自己把新 Token 捡回来
+      React.useEffect(() => {
+        if (watchLeft <= 0) return undefined;
+        const id = window.setInterval(() => {
+          if (scanRef.current) scanRef.current(true);
+          setWatchLeft((value) => (value <= 3 ? 0 : value - 3));
+        }, 3000);
+        return () => window.clearInterval(id);
+      }, [watchLeft > 0]);
 
       // 只有配置真的变了才清空草稿；轮询刷新 state 时不要把用户正在改的内容清掉
       React.useEffect(() => {
@@ -473,6 +569,81 @@ window.__ModuleLoader__.load({
             style: { fontSize: 12, color: phase === 'failed' ? C.danger : C.sub },
           }, message),
         ]),
+      ]));
+
+      // Token 区块：登录态续期。微信端没法被程序驱动开网址（试过，不通），
+      // 但可以扫它的本地存储 —— 你在微信里点一次链接，这里就能把新 Token 捡回来。
+      const candidates = (scanData && Array.isArray(scanData.candidates)) ? scanData.candidates : [];
+      const btnStyle = (primary, disabled) => ({
+        padding: '6px 12px',
+        fontSize: 13,
+        borderRadius: 6,
+        border: `1px solid ${C.border}`,
+        background: disabled ? C.surfaceMuted : (primary ? C.link : 'transparent'),
+        color: disabled ? C.faint : (primary ? '#fff' : C.sub),
+        cursor: disabled ? 'default' : 'pointer',
+      });
+      children.push(h('section', {
+        key: 'token-box',
+        style: {
+          border: `1px solid ${C.border}`,
+          borderRadius: 8,
+          background: C.surfaceMuted,
+          padding: '10px 12px',
+          marginBottom: 10,
+        },
+      }, [
+        h('div', { key: 't', style: { fontSize: 13, fontWeight: 600, color: C.text } }, 'Token（登录态）'),
+        h('div', { key: 'h', style: { fontSize: 12, color: C.faint, marginTop: 2, lineHeight: 1.6 } },
+          '这个平台的 Token 有效期短。续期最省事的办法：在【电脑版微信】里点开一次登录链接，Token 会落到本机，插件下次自动继承（手机微信不行，数据不会写到这台电脑上）。'),
+        h('div', { key: 'b', style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' } }, [
+          h('button', {
+            key: 'scan',
+            type: 'button',
+            disabled: scanning || watchLeft > 0,
+            onClick: () => scanTokens(false),
+            style: btnStyle(true, scanning || watchLeft > 0),
+          }, scanning ? '扫描中…' : '扫描 Token'),
+          h('button', {
+            key: 'watch',
+            type: 'button',
+            disabled: watchLeft > 0,
+            onClick: () => {
+              setWatchLeft(180);
+              setTokenMsg('监听中：现在去电脑版微信点开链接登录，抓到有效 Token 会自动写入。');
+              scanTokens(true);
+            },
+            style: btnStyle(false, watchLeft > 0),
+          }, watchLeft > 0 ? `监听中 ${watchLeft}s` : '监听 3 分钟（去微信点链接）'),
+          h('button', {
+            key: 'copy',
+            type: 'button',
+            onClick: copyLoginLink,
+            style: btnStyle(false, false),
+          }, '复制登录链接'),
+        ]),
+        tokenMsg === '' ? null : h('div', {
+          key: 'msg',
+          style: { fontSize: 12, color: C.sub, marginTop: 8, lineHeight: 1.6, wordBreak: 'break-all' },
+        }, tokenMsg),
+        candidates.length === 0 ? null : h('div', { key: 'list', style: { marginTop: 8 } }, candidates.slice(0, 8).map((item, index) =>
+          h('div', {
+            key: `c${index}`,
+            style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: C.sub, padding: '3px 0' },
+          }, [
+            h('span', { key: 'v', style: { color: item.valid ? C.ok : C.danger, width: 16 } }, item.valid ? '✅' : '❌'),
+            h('span', { key: 's', style: { width: 64, color: C.faint } }, item.source === 'wechat' ? '微信端' : '配置里'),
+            h('span', { key: 'm', style: { fontFamily: 'monospace' } }, item.masked),
+            item.valid
+              ? h('button', {
+                  key: 'use',
+                  type: 'button',
+                  onClick: () => saveToken(item.token, item.source === 'wechat' ? '微信端' : '配置里'),
+                  style: { ...btnStyle(false, false), padding: '2px 8px', fontSize: 12 },
+                }, '用这个')
+              : h('span', { key: 'x', style: { color: C.faint } }, '已过期'),
+          ])
+        )),
       ]));
 
       if (disabled) {

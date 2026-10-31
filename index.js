@@ -30,7 +30,7 @@ const DEFAULT_RUN_TIMES = ["20:30"];
 const DEFAULT_API_BASE = "https://wjiaowu.smu.edu.cn/dev-api";
 const DEFAULT_SUGGESTION = "课程内容充实，教学认真负责，受益匪浅。";
 
-import { runBrowserRun } from "./browser.js";
+import { runBrowserRun, collectWeChatTokens } from "./browser.js";
 import z from "@deepseek-ai/schemastery";
 import fs from "node:fs";
 import os from "node:os";
@@ -351,6 +351,98 @@ async function apiCall(config, path, body, method) {
   return json;
 }
 
+/** 掩码展示 Token：够辨认、又不至于被复制走。 */
+function maskToken(token) {
+  const t = String(token || "");
+  if (t.length <= 10) return t === "" ? "(空)" : t.slice(0, 4) + "…";
+  return `${t.slice(0, 6)}…${t.slice(-4)}`;
+}
+
+/**
+ * 校验一个 Token 是否还有效：直接打 getIstoken（GET，header 带 token）。
+ * 不启浏览器，几百毫秒就有结果，可以放心在面板里反复点。
+ */
+async function validateTokenDetailed(apiBase, token) {
+  if (!token) return { valid: false, code: 0, message: "空 Token" };
+  const base = String(apiBase || DEFAULT_API_BASE).replace(/\/$/, "");
+  try {
+    const res = await fetch(`${base}/appapi/getIstoken`, {
+      method: "GET",
+      headers: {
+        token: String(token),
+        Accept: "application/json, text/plain, */*",
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
+      },
+    });
+    const text = await res.text();
+    let json = null;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = null;
+    }
+    if (json === null) {
+      return { valid: false, code: res.status, message: `接口返回非 JSON（HTTP ${res.status}）` };
+    }
+    return { valid: json.code === 200, code: json.code, message: String(json.msg || "") };
+  } catch (err) {
+    return { valid: false, code: -1, message: String(err && err.message ? err.message : err) };
+  }
+}
+
+/**
+ * 扫一遍所有能拿到的 Token 来源并逐个校验。
+ * 这是「在微信里点一下链接 → 插件自动继承」的可用替代：
+ * 微信端没法被程序驱动去开网址（见 README），但可以持续盯着它的本地存储。
+ */
+async function scanTokenSources(config, log) {
+  const apiBase = config.apiBase || DEFAULT_API_BASE;
+  const candidates = [];
+
+  let wechat = [];
+  try {
+    wechat = collectWeChatTokens(log) || [];
+  } catch (err) {
+    log("warn", `扫描微信存储失败：${err.message}`);
+    wechat = [];
+  }
+  // 离 wjiaowu 越近越可能有效，最多验 8 个，够快也够准
+  for (const token of wechat.slice(0, 8)) {
+    const v = await validateTokenDetailed(apiBase, token);
+    candidates.push({
+      source: "wechat",
+      masked: maskToken(token),
+      token,
+      valid: v.valid,
+      code: v.code,
+      message: v.message,
+    });
+  }
+
+  const configToken = String(config.token || "");
+  if (configToken !== "") {
+    const v = await validateTokenDetailed(apiBase, configToken);
+    candidates.push({
+      source: "config",
+      masked: maskToken(configToken),
+      token: configToken,
+      valid: v.valid,
+      code: v.code,
+      message: v.message,
+    });
+  }
+
+  const best = candidates.find((item) => item.valid) || null;
+  return {
+    candidates,
+    wechatCount: wechat.length,
+    configToken: configToken !== "",
+    best: best === null ? null : { source: best.source, masked: best.masked, token: best.token },
+    checkedAt: nowIso(),
+  };
+}
+
 /** 取当前学期 */
 async function fetchSemester(config) {
   const idx = await apiCall(config, "/appapi/Studentpjwj/index", undefined, "GET");
@@ -420,9 +512,17 @@ function buildAnswers(config, wtList) {
     } else if (tx === "1") {
       const selections = item.selections || [];
       if (!selections.length) continue;
-      // 迟到题固定选「否」
-      const want = String(item.zbmc || "").includes("迟到") ? config.lateAnswer || "否" : null;
-      const sel = want ? selections.find((s) => s.zbxmmc === want) || selections[0] : selections[0];
+      // 判断题一律选否定项：「教师上课迟到5分钟以上」「教师宣传错误价值理念」
+      // 这类题选「是」等于给老师打差评，真实评价里永远是「否」。
+      // 迟到题仍然优先用配置里的 lateAnswer。
+      const isLate = String(item.zbmc || "").includes("迟到");
+      const preferred = isLate ? String(config.lateAnswer || "否") : "否";
+      const negatives = ["否", "没有", "无", "不存在", "未"];
+      const sel =
+        selections.find((s) => String(s.zbxmmc || "").trim() === preferred) ||
+        selections.find((s) => negatives.includes(String(s.zbxmmc || "").trim())) ||
+        selections.find((s) => negatives.some((word) => String(s.zbxmmc || "").includes(word))) ||
+        selections[selections.length - 1];
       const fz = (Number(sel.fzbl) || 0) * (Number(item.zbfz) || 0) / 100;
       dt.push({
         txdm: item.txdm,
@@ -926,7 +1026,7 @@ export async function apply(ctx, rawConfig = {}) {
   const config = { ...DEFAULTS, ...rawConfig };
   const disposers = [];
 
-  let state = { lastRun: null, lastResult: null, runCount: 0, tokenInvalid: false, running: false };
+  let state = { lastRun: null, lastResult: null, runCount: 0, tokenInvalid: false, running: false, scanning: false };
 
   const log = (level, msg) => {
     console.log(`[${PLUGIN}] [${level}] ${msg}`);
@@ -1301,6 +1401,22 @@ export async function apply(ctx, rawConfig = {}) {
                 })(),
               },
             });
+          }
+
+          // 扫描所有 Token 来源并校验：面板「扫描 Token / 监听微信」调这里。
+          if (req.method === "POST" && url.pathname === `${WEB_ROUTE}/token/scan`) {
+            if (state.scanning) {
+              return sendJson(res, 409, { ok: false, error: "正在扫描，稍等" });
+            }
+            state.scanning = true;
+            try {
+              const data = await scanTokenSources(config, log);
+              return sendJson(res, 200, { ok: true, data });
+            } catch (err) {
+              return sendJson(res, 500, { ok: false, error: `扫描失败：${err.message}` });
+            } finally {
+              state.scanning = false;
+            }
           }
 
           // 立即执行：面板上的「立即执行 / 试运行」按钮调这里。

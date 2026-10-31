@@ -168,6 +168,18 @@ function buildRadioPlan(config) {
   };
 }
 
+/** 「否 / 没有 / 无 / 不存在」这类否定项——判断题一律选它们。 */
+const NEGATIVE_WORDS = ["否", "没有", "无", "不存在", "未"];
+
+function pickNegativeOption(options) {
+  const list = Array.isArray(options) ? options : [];
+  return (
+    list.find((o) => NEGATIVE_WORDS.includes(String(o).trim())) ||
+    list.find((o) => NEGATIVE_WORDS.some((word) => String(o).includes(word))) ||
+    null
+  );
+}
+
 function pickOptionForQuestion(questionText, options, plan) {
   const q = String(questionText || "");
   const has = (kw) => q.includes(kw);
@@ -179,6 +191,11 @@ function pickOptionForQuestion(questionText, options, plan) {
   else if (has("自主学习的比例") || has("自主学习的占比")) want = plan.selfStudy;
 
   if (want && options.includes(want)) return want;
+  // 判断题（是/否、有/没有）一律选否定项：
+  // 「教师上课迟到5分钟以上」「教师宣传错误价值理念」这类选「是」等于给老师打差评，
+  // 真实评价里这些永远是「否」。没有否定项的题（单选多选）再退回第一项。
+  const negative = pickNegativeOption(options);
+  if (negative !== null) return negative;
   return options[0] || null;
 }
 
@@ -519,6 +536,37 @@ async function scanPending(page) {
  * 执行一轮随堂评价（浏览器方式）
  * @returns {ok, evaluated, pending, message, details, tokenInvalid}
  */
+/**
+ * 校验一个 Token 是否还有效：直接打 getIstoken，不启浏览器。
+ * 必须用这个做「第一跳」判断——页面里的 fetch 会被 SPA 的微信 OAuth 重定向带偏，
+ * 打到 open.weixin.qq.com 上变成 404，从而把有效 Token 误判成失效。
+ */
+export async function validateToken(apiBase, token) {
+  if (!token) return false;
+  const base = String(apiBase || "https://wjiaowu.smu.edu.cn/dev-api").replace(/\/$/, "");
+  try {
+    const res = await fetch(`${base}/appapi/getIstoken`, {
+      method: "GET",
+      headers: {
+        token: String(token),
+        Accept: "application/json, text/plain, */*",
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
+      },
+    });
+    const text = await res.text();
+    let json = null;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      return false;
+    }
+    return json.code === 200;
+  } catch {
+    return false;
+  }
+}
+
 export async function runBrowserRun(config, log) {
   const details = [];
   let ctx;
@@ -558,11 +606,48 @@ export async function runBrowserRun(config, log) {
     // 这样 UA 与本机实际浏览器完全一致（也免去移植时改 UA）
     if (config.userAgent) launchOptions.userAgent = config.userAgent;
 
+    // ---- 先在浏览器外面把 Token 定下来 ----
+    // 踩过的坑：如果先 goto 再在页面里校验，未带 Token 的首次访问会被 SPA 重定向到
+    // open.weixin.qq.com 的 OAuth 页，此后所有相对路径请求都打到微信域名（404），
+    // 于是一个有效的 Token 也会被判成「失效」。所以顺序必须是：选 Token → 注入 → 再打开。
+    const wxTokens = config.readWeChatToken === false ? [] : collectWeChatTokens(log);
+    if (wxTokens.length) log("info", `微信端扫描到 ${wxTokens.length} 个候选 Token`);
+
+    const candidates = [];
+    for (const t of wxTokens.slice(0, 15)) candidates.push({ token: t, source: "wechat" });
+    if (config.token) candidates.push({ token: config.token, source: "config" });
+
+    let chosen = "";
+    let tokenSource = "";
+    for (const item of candidates) {
+      if (await validateToken(config.apiBase, item.token)) {
+        chosen = item.token;
+        tokenSource = item.source;
+        break;
+      }
+    }
+    if (!chosen) {
+      const head =
+        candidates.length === 0
+          ? "本机没找到任何 Token（微信端、配置里都是空的）"
+          : `找到 ${candidates.length} 个 Token 候选，但全部已过期（微信端 ${wxTokens.length} / 配置 ${config.token ? 1 : 0}）`;
+      throw tokenError(
+        `${head}。请在【电脑版微信】里打开一次 wjiaowu.smu.edu.cn 并登录（手机微信不行，不会写到这台电脑上），之后插件会自动继承新 Token，无需手工复制`
+      );
+    }
+    log("info", `选用 ${tokenSource === "wechat" ? "微信端" : "配置里"} 的 Token`);
+
     ctx = await chromium.launchPersistentContext(profileDir, launchOptions);
 
-    // 注意：这里不再强制写死配置里的 Token。
-    // profile 是从真实 Edge 同步过来的，里面可能已经有更新的 Token
-    // （用户如果在自己的 Edge 里重新登录过，这里会自动继承，无需改配置）。
+    // 每次导航前就把 Token 写进 localStorage：SPA 一启动就认到登录态，不会跳 OAuth
+    await ctx.addInitScript((tok) => {
+      try {
+        localStorage.setItem("Token", tok);
+      } catch {
+        // 非本站 origin（比如微信授权页）写不了，忽略
+      }
+    }, chosen);
+
     const page = ctx.pages()[0] || (await ctx.newPage());
     page.setDefaultTimeout(30000);
 
@@ -573,55 +658,10 @@ export async function runBrowserRun(config, log) {
     });
     await sleep(rand(5000, 9000));
 
-    // Token 解析顺序：微信端（自动更新）→ 浏览器 profile → 配置里的
-    // 微信端优先级最高：用户在微信里一登录，新 Token 就落到 leveldb，这里自动继承。
-    const profileToken = await page.evaluate(() => {
-      try {
-        return localStorage.getItem("Token") || "";
-      } catch {
-        return "";
-      }
-    });
-
-    const tryToken = async (tok) =>
-      page.evaluate(async (t) => {
-        try {
-          localStorage.setItem("Token", t);
-        } catch {}
-        try {
-          const r = await fetch("/dev-api/appapi/getIstoken", { headers: { token: t } });
-          const j = await r.json();
-          return !!(j && j.code === 200);
-        } catch {
-          return false;
-        }
-      }, tok);
-
-    const wxTokens = config.readWeChatToken === false ? [] : collectWeChatTokens(log);
-    if (wxTokens.length) log("info", `微信端扫描到 ${wxTokens.length} 个候选 Token`);
-
-    let chosen = "";
-    let tokenSource = "";
-
-    for (const t of wxTokens.slice(0, 15)) {
-      if (t === profileToken) continue;
-      if (await tryToken(t)) {
-        chosen = t;
-        tokenSource = "wechat";
-        break;
-      }
-    }
-    if (!chosen && profileToken && (await tryToken(profileToken))) {
-      chosen = profileToken;
-      tokenSource = "profile";
-    }
-    if (!chosen && config.token && (await tryToken(config.token))) {
-      chosen = config.token;
-      tokenSource = "config";
-    }
-    if (!chosen) {
+    // 兜底：如果还是被带去了微信授权页，说明这个 Token 在页面里没被接受
+    if (page.url().includes("open.weixin.qq.com")) {
       throw tokenError(
-        "所有 Token 均已失效。请在【电脑版微信】里打开一次 wjiaowu.smu.edu.cn 并登录（手机微信不行，不会写到这台电脑上），之后插件会自动继承新 Token，无需手工复制"
+        "平台把浏览器重定向到了微信授权页（open.weixin.qq.com）。Token 本身有效，但页面没停在平台上；请在电脑版微信里点开一次平台链接后重试"
       );
     }
 
@@ -701,6 +741,9 @@ export async function runBrowserRun(config, log) {
       }
 
       let guard = 0;
+      // 试运行（不提交）时，服务端的「未评价」列表不会变，pending[0] 每轮都是同一门，
+      // 会反复点同一节课。用 processed 记住点过的名字，并按试运行直接收手。
+      const processed = new Set();
       while (done < maxPerRun && guard < 20) {
         guard += 1;
 
@@ -710,8 +753,14 @@ export async function runBrowserRun(config, log) {
           break;
         }
 
-        const target = pending[0];
+        const target = pending.find((item) => !processed.has(item.text.replace(/评价\s*$/, "").trim()));
+        if (!target) {
+          log("info", `  ${dstr} 没有新的可评课节（剩下的都处理过了）`);
+          break;
+        }
+
         const name = target.text.replace(/评价\s*$/, "").trim();
+        processed.add(name);
         log("info", `  处理：${name}`);
 
         try {
