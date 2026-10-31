@@ -149,6 +149,16 @@ smueval-bot-getStatus
 
 截图留证在 `%LOCALAPPDATA%\smueval-bot\wechat-token-<时分秒>.png`。
 
+**不开 DSH 也能续期**（计划任务模式）：`run-once.mjs` 发现 Token 失效时会自己跑
+`tools/wechat-token.ps1`、扫 leveldb、写回配置快照，然后补跑一次。也可以单独执行：
+
+```
+node "<插件目录>\tools\run-once.mjs" --refresh-token
+```
+
+> 注意：这条链路要操作微信窗口，**必须在已登录的桌面会话里跑**（锁屏状态下点不了）。
+> 需要微信处于登录态；没开的话脚本会自己启动并等你扫码。
+
 > 为什么必须点一次？微信 PC 端没有"用接口在内置浏览器打开网址"的能力（协议、端口、进程、UIA 全试过）。
 > 但浮窗点击走的是微信原生「打开链接」管道，所以 OAuth 会真的重跑——这是唯一有效的入口。
 

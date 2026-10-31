@@ -45,11 +45,13 @@ window.__ModuleLoader__.load({
       padding: '5px 8px',
       fontSize: 13,
       color: C.text,
-      background: C.surface,
-      border: `1px solid ${C.border}`,
+      // 透明底 = 直接用外层 section 的背景，避免"两种底色叠在一起"造成的割裂感；
+      // 边框换成更明显的 border-l2，深色主题下也看得清。
+      background: 'transparent',
+      border: `1px solid ${C.borderStrong}`,
       borderRadius: 6,
       outline: 'none',
-      colorScheme: 'inherit',
+      caretColor: C.text,
     };
 
     const FIELDS = [
@@ -148,6 +150,44 @@ window.__ModuleLoader__.load({
       } catch {
         // 没有 window 就算了
       }
+    }
+
+    /** 读 body 背景亮度判断深色主题；主题切换时自动更新（不刷新页面）。 */
+    function useDarkTheme() {
+      const [dark, setDark] = React.useState(false);
+      React.useEffect(() => {
+        const read = () => {
+          try {
+            const raw = getComputedStyle(document.body).backgroundColor || '';
+            const nums = raw.match(/[\d.]+/g);
+            if (!nums || nums.length < 3) return;
+            const r = Number(nums[0]);
+            const g = Number(nums[1]);
+            const b = Number(nums[2]);
+            const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+            setDark(lum < 0.5);
+          } catch {
+            // 读不到就当中性处理
+          }
+        };
+        read();
+        let observer = null;
+        try {
+          observer = new MutationObserver(read);
+          observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] });
+          observer.observe(document.body, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] });
+        } catch {
+          observer = null;
+        }
+        return () => {
+          try {
+            if (observer) observer.disconnect();
+          } catch {
+            // 忽略
+          }
+        };
+      }, []);
+      return dark;
     }
 
     /** 读一次配置；组件里用，失败给出可读原因。 */
@@ -289,6 +329,8 @@ window.__ModuleLoader__.load({
       const [tokenMsg, setTokenMsg] = React.useState('');
       const scanningRef = React.useRef(false);
       const scanRef = React.useRef(null);
+      // 深色/浅色主题探测：靠读 body 背景亮度，切主题不用刷新也能跟上
+      const dark = useDarkTheme();
       // 「用微信浮窗刷新 Token」的忙碌态：这个动作要开关微信窗口，可能十几秒
       const [wechatBusy, setWechatBusy] = React.useState(false);
 
@@ -792,7 +834,17 @@ window.__ModuleLoader__.load({
         st.tokenInvalid ? h('div', { key: 'c', style: { color: C.danger } }, '⚠️ Token 已失效，去电脑版微信打开一次 wjiaowu.smu.edu.cn') : null,
       ]));
 
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4, marginTop: 4 } }, children);
+      // colorScheme 会继承：把它放在根容器上，input/select/滚动条这些原生控件
+      // 就会跟着 DSH 的深浅色走，不会出现"深色主题里输入框还是白的"这种冲突。
+      return h('div', {
+        style: {
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 4,
+          marginTop: 4,
+          colorScheme: dark ? 'dark' : 'light',
+        },
+      }, children);
     }
 
     /** 会话输入框下方的状态条；配置里关掉 showStatusBar 就整个不渲染。 */
