@@ -12,6 +12,8 @@ window.__ModuleLoader__.load({
     const API = '/api/smueval-bot/config';
     /** 保存成功后广播，让同页的状态条立刻跟着刷新。 */
     const CONFIG_EVENT = 'smueval-bot:config-changed';
+    /** 后台跑完（计划任务/定时器）时的轮询间隔：够及时，也不至于一直敲本机端点。 */
+    const REFRESH_MS = 60000;
 
     // 只用 DSH 真实存在的主题 token（浅色/深色各自有值），并给浅色兜底。
     // 之前写的是 --dsw-alias-bg-input / --dsw-alias-label-tertiary 这类不存在的
@@ -164,10 +166,18 @@ window.__ModuleLoader__.load({
         } catch {
           // 没有 window 就算了
         }
+        // 后台跑完（尤其是计划任务）也要能自己刷新，否则回执会一直停在旧的那次
+        let timer = null;
+        try {
+          timer = window.setInterval(bump, REFRESH_MS);
+        } catch {
+          timer = null;
+        }
         return () => {
           live = false;
           try {
             window.removeEventListener(CONFIG_EVENT, bump);
+            if (timer !== null) window.clearInterval(timer);
           } catch {
             // 忽略
           }
