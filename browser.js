@@ -957,3 +957,265 @@ export async function runBrowserRun(config, log) {
     } catch {}
   }
 }
+
+/**
+ * 期末「评课程」（手动触发，不进每日自动流程）。
+ *
+ * 与随堂评的区别：
+ *   - 入口是底部 tab「评课程」，列表接口 /appapi/Studentpjwj/course，表单 /pjCourse，提交 /saveCoursePj
+ *   - 一门课只有一次，整学期一次就够；12 道星题 + 2 道单选 + 1 个比例选择 + 2 个文本框 + 照片（选填）
+ *   - 星题满分合计 100，全选「非常赞同」即 100 分
+ */
+export async function runCourseRun(config, log) {
+  const details = [];
+  let evaluated = 0;
+  let tokenInvalid = false;
+  let ctx;
+
+  try {
+    const { chromium } = await import("playwright-core");
+    const browser = resolveBrowser(config, log);
+    const profileDir = config.profileDir
+      ? expandEnv(config.profileDir)
+      : path.join(os.tmpdir(), `smueval-${browser.id}-profile`);
+
+    // Token 先在外面验好（页面里的校验会被 OAuth 重定向带偏）
+    const wxTokens = config.readWeChatToken === false ? [] : collectWeChatTokens(log);
+    const candidates = [];
+    for (const t of wxTokens.slice(0, 15)) candidates.push({ token: t, source: "wechat" });
+    if (config.token) candidates.push({ token: config.token, source: "config" });
+    let chosen = "";
+    for (const item of candidates) {
+      if (await validateToken(config.apiBase, item.token)) {
+        chosen = item.token;
+        break;
+      }
+    }
+    if (!chosen) throw tokenError("所有 Token 都无效：请先去电脑版微信浮窗点一次「教学服务平台系统」");
+
+    log("info", `启动浏览器：${browser.path}（${browser.id}）`);
+    seedProfile(profileDir, config, log);
+
+    const launchArgs = ["--disable-blink-features=AutomationControlled"];
+    if (config.windowSize) launchArgs.push(`--window-size=${config.windowSize}`);
+    ctx = await chromium.launchPersistentContext(profileDir, {
+      executablePath: browser.path,
+      headless: config.headless === true,
+      viewport: config.useRealViewport === false
+        ? { width: Number(config.viewportWidth) || 1024, height: Number(config.viewportHeight) || 800 }
+        : null,
+      locale: "zh-CN",
+      timezoneId: "Asia/Shanghai",
+      args: launchArgs,
+    });
+    await ctx.addInitScript((tok) => {
+      try {
+        localStorage.setItem("Token", tok);
+      } catch {}
+    }, chosen);
+
+    const page = ctx.pages()[0] || (await ctx.newPage());
+    page.setDefaultTimeout(30000);
+    log("info", "打开教学评价页…");
+    await page.goto("https://wjiaowu.smu.edu.cn/#/appXspj", { waitUntil: "domcontentloaded", timeout: 60000 });
+    await sleep(rand(4000, 7000));
+    if (page.url().includes("open.weixin.qq.com")) throw tokenError("平台把浏览器重定向到微信授权页，Token 未被接受");
+    await assertLoggedIn(page);
+
+    const tab = page.locator(".van-tabbar-item", { hasText: "评课程" }).first();
+    if ((await tab.count()) === 0) throw new Error("页面上找不到「评课程」入口（学期可能未开放课程评价）");
+    await humanClick(page, tab, log);
+    await sleep(rand(3500, 5500));
+    log("info", "已切到「评课程」");
+
+    const maxPerRun = Math.max(1, Number(config.courseMaxPerRun) || 20);
+    const processed = new Set();
+    let guard = 0;
+
+    while (evaluated < maxPerRun && guard < 30) {
+      guard += 1;
+
+      const listing = await page.evaluate(() => {
+        const rows = [...document.querySelectorAll(".van-cell, .van-row, .van-card")]
+          .map((el) => ({ text: (el.innerText || "").replace(/\s+/g, " ").trim() }))
+          .filter((r) => r.text.length > 0 && r.text.length < 120);
+        return rows;
+      });
+      const hasPending = await page.getByText("评价", { exact: true }).count();
+      if (hasPending === 0) {
+        log("info", "没有待评价的课程了");
+        break;
+      }
+
+      // 取第一个「评价」按钮；先试出它属于哪门课，便于日志和去重
+      const btn = page.getByText("评价", { exact: true }).first();
+      const name = await btn.evaluate((el) => {
+        let p = el;
+        for (let i = 0; i < 5 && p; i++) {
+          const t = (p.innerText || "").replace(/\s+/g, " ").trim();
+          const m = t.match(/^(.*?)\s*评价$/);
+          if (m && m[1]) return m[1].trim();
+          p = p.parentElement;
+        }
+        return "未知课程";
+      }).catch(() => "未知课程");
+
+      if (processed.has(name)) {
+        log("warn", `  ${name} 已经处理过，跳过以避免死循环`);
+        break;
+      }
+      processed.add(name);
+      log("info", `  处理：${name}`);
+
+      try {
+        await humanClick(page, btn, log);
+        await sleep(rand(2800, 4500));
+        await page.locator(".van-rate").first().waitFor({ state: "visible", timeout: 20000 });
+
+        // 1) 星题：全部「非常赞同」（第 5 档）
+        const rateCount = await page.locator(".van-rate").count();
+        for (let i = 0; i < rateCount; i++) {
+          const item = page.locator(".van-rate").nth(i).locator(".van-rate__item").nth(4);
+          await humanClick(page, item, log);
+          await sleep(rand(500, 1400));
+        }
+        log("info", `    打星 ${rateCount} 题（全五星）`);
+
+        // 2) 单选题
+        const groups = await page.evaluate(() =>
+          [...document.querySelectorAll(".van-radio-group")].map((g) => ({
+            opts: [...g.querySelectorAll(".van-radio")].map((r) => r.innerText.trim()),
+          }))
+        );
+        const wantByGroup = ["无职务", "按要求完成了学习", "课程学时30%以内"];
+        for (let i = 0; i < groups.length; i++) {
+          const opts = groups[i].opts || [];
+          const want = wantByGroup.find((w) => opts.includes(w)) || opts[opts.length - 1];
+          if (!want) continue;
+          const opt = page.locator(".van-radio-group").nth(i).locator(".van-radio", { hasText: want }).first();
+          if ((await opt.count()) > 0) {
+            await humanClick(page, opt, log);
+            await sleep(rand(300, 800));
+          }
+        }
+
+        // 3) 自主学习比例（不是 radio 时是选择器）
+        const hasRatioRadio = groups.some((g) => (g.opts || []).some((o) => o.includes("课程学时")));
+        if (!hasRatioRadio) {
+          const cell = page.locator(".van-cell", { hasText: "自主学习的比例" }).first();
+          if ((await cell.count()) > 0) {
+            await humanClick(page, cell, log);
+            await sleep(rand(1200, 2200));
+            const opt = page.locator(".van-picker-column__item, .van-action-sheet__item").filter({ hasText: "课程学时30%以内" }).first();
+            if ((await opt.count()) > 0) {
+              await humanClick(page, opt, log);
+              await sleep(rand(400, 900));
+            }
+            const confirm = page.locator(".van-picker__confirm").first();
+            if ((await confirm.count()) > 0) {
+              await humanClick(page, confirm, log);
+              await sleep(rand(600, 1200));
+            }
+            log("info", "    已选自主学习比例：课程学时30%以内");
+          }
+        }
+
+        // 4) 文本框：第一个填建议，第二个（优秀教师姓名）留空
+        if (config.fillSuggestion !== false) {
+          const ta = page.locator("textarea").first();
+          if ((await ta.count()) > 0) {
+            const text = pickSuggestion(config, "");
+            if (text) {
+              await humanType(page, ta, text);
+              await sleep(rand(800, 1800));
+              log("info", `    已填建议：${text.slice(0, 16)}…`);
+            }
+          }
+        }
+
+        // 5) 提交
+        if (config.skipSubmit) {
+          const info = await page.evaluate(() => {
+            let score = "";
+            for (const el of document.querySelectorAll("*")) {
+              const t = (el.innerText || "").trim();
+              if (/^综合评分/.test(t) && t.length < 60) {
+                score = t.replace(/\s+/g, " ");
+                break;
+              }
+            }
+            const rates = [...document.querySelectorAll(".van-rate")].map((r) => {
+              const items = [...r.querySelectorAll(".van-rate__item")];
+              let n = 0;
+              items.forEach((it, i) => {
+                if (it.getAttribute("aria-checked") === "true") n = i + 1;
+              });
+              return n;
+            });
+            return { score, rates };
+          });
+          log("info", `    [试运行] ${info.score} 星=${JSON.stringify(info.rates)}`);
+          details.push({ name, status: "dry-run", ...info });
+          evaluated += 1;
+          const back = page.locator(".van-nav-bar__left").first();
+          if ((await back.count()) > 0) await humanClick(page, back, log);
+          await sleep(rand(2500, 4000));
+          continue;
+        }
+
+        const submit = page.locator(".van-tabbar-item", { hasText: "提交" }).first();
+        await humanClick(page, submit, log);
+        await sleep(rand(1200, 2200));
+        const confirm = page.locator(".van-dialog__confirm").first();
+        if ((await confirm.count()) > 0) {
+          await humanClick(page, confirm, log);
+          await sleep(rand(2500, 4500));
+        }
+        const toast = await page.evaluate(
+          () => (document.querySelector(".van-toast__text, .van-notify__text") || {}).innerText || ""
+        );
+        if (toast) log("info", `    提示：${toast.trim()}`);
+        const ok = /成功/.test(toast);
+        details.push({ name, status: ok ? "ok" : "unknown", toast: String(toast).trim() });
+        if (ok) evaluated += 1;
+        log("info", ok ? `    ✅ ${name} 已提交` : `    ⚠️ ${name} 提交结果未知（${toast || "无提示"}）`);
+        await sleep(rand(2500, 4500));
+      } catch (err) {
+        if (err && err.code === 401) throw err;
+        log("warn", `    处理 ${name} 出错：${err.message}`);
+        details.push({ name, status: "error", message: err.message });
+        const back = page.locator(".van-nav-bar__left").first();
+        if ((await back.count()) > 0) {
+          try { await humanClick(page, back, log); } catch {}
+        }
+        await sleep(rand(1500, 2500));
+      }
+    }
+
+    return {
+      ok: evaluated > 0 || details.length === 0,
+      evaluated,
+      pending: details.length,
+      tokenInvalid: false,
+      message:
+        details.length === 0
+          ? "没有可评价的课程"
+          : `评课程完成：成功 ${evaluated} 门，共处理 ${details.length} 门`,
+      details,
+    };
+  } catch (err) {
+    if (err && err.code === 401) tokenInvalid = true;
+    return {
+      ok: false,
+      evaluated,
+      pending: details.length,
+      tokenInvalid,
+      message: tokenInvalid ? `Token 已失效：${err.message}` : `评课程异常：${err.message}`,
+      details,
+    };
+  } finally {
+    try {
+      if (ctx) await ctx.close();
+    } catch {}
+  }
+}

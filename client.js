@@ -16,6 +16,8 @@ window.__ModuleLoader__.load({
     const API_TOKEN_SCAN = '/api/smueval-bot/token/scan';
     /** 走微信浮窗换新 Token 的端点。 */
     const API_TOKEN_WECHAT = '/api/smueval-bot/token/refresh-wechat';
+    /** 期末评课程的端点（只在手动点按钮时触发）。 */
+    const API_COURSE = '/api/smueval-bot/course/evaluate';
     /** 登录页地址：复制到电脑版微信里点开，Token 就会落到本机。 */
     const LOGIN_URL = 'https://wjiaowu.smu.edu.cn/#/work';
     /** 保存成功后广播，让同页的状态条立刻跟着刷新。 */
@@ -329,6 +331,9 @@ window.__ModuleLoader__.load({
       const [tokenMsg, setTokenMsg] = React.useState('');
       const scanningRef = React.useRef(false);
       const scanRef = React.useRef(null);
+      // 期末评课程：独立按钮触发，平时自动流程不碰
+      const [courseBusy, setCourseBusy] = React.useState(false);
+      const [courseMsg, setCourseMsg] = React.useState('');
       // 深色/浅色主题探测：靠读 body 背景亮度，切主题不用刷新也能跟上
       const dark = useDarkTheme();
       // 「用微信浮窗刷新 Token」的忙碌态：这个动作要开关微信窗口，可能十几秒
@@ -586,6 +591,31 @@ window.__ModuleLoader__.load({
           });
       };
 
+      /** 期末评课程：只有学期末用一次，平时自动评课不包含它。 */
+      const startCourseRun = (dryRun) => {
+        if (courseBusy) return;
+        setCourseBusy(true);
+        setCourseMsg(dryRun ? '正在试运行评课程（不提交）…' : '正在评课程，会自己开浏览器逐门点完再提交…');
+        requestJson(API_COURSE, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ dryRun: dryRun === true }),
+        })
+          .then((body) => {
+            setCourseBusy(false);
+            const data = body && body.data ? body.data : {};
+            if (body && body.ok === true) {
+              setCourseMsg(data.message || `完成：${data.evaluated || 0} 门`);
+              return;
+            }
+            setCourseMsg('失败：' + ((body && body.error) || data.message || '未知原因'));
+          })
+          .catch((cause) => {
+            setCourseBusy(false);
+            setCourseMsg('失败：' + String((cause && cause.message) || cause));
+          });
+      };
+
       const groups = [];
       for (const spec of FIELDS) {
         let group = groups.find((item) => item.name === spec.group);
@@ -734,6 +764,51 @@ window.__ModuleLoader__.load({
               : h('span', { key: 'x', style: { color: C.faint } }, '已过期'),
           ])
         )),
+      ]));
+
+      // 期末评课程：独立区块，平时不跑，只有学期末手动点
+      children.push(h('section', {
+        key: 'course-box',
+        style: {
+          border: `1px solid ${C.border}`,
+          borderRadius: 8,
+          background: C.surfaceMuted,
+          padding: '10px 12px',
+          marginBottom: 10,
+        },
+      }, [
+        h('div', { key: 't', style: { fontSize: 13, fontWeight: 600, color: C.text } }, '期末评课程（手动）'),
+        h('div', { key: 'h', style: { fontSize: 12, color: C.faint, marginTop: 2, lineHeight: 1.6 } },
+          '整学期只用一次，学期末开放时点。和每天的随堂评课完全分开，自动流程不会碰它。会把「评课程」里所有未评价的课逐门打满星、按常规选项作答并提交。'),
+        h('div', { key: 'b', style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' } }, [
+          h('button', {
+            key: 'run',
+            type: 'button',
+            disabled: courseBusy,
+            onClick: () => startCourseRun(false),
+            style: {
+              padding: '6px 16px',
+              fontSize: 13,
+              borderRadius: 6,
+              border: `1px solid ${courseBusy ? C.border : C.text}`,
+              background: courseBusy ? C.surfaceMuted : C.text,
+              color: courseBusy ? C.sub : C.surface,
+              fontWeight: 600,
+              cursor: courseBusy ? 'default' : 'pointer',
+            },
+          }, courseBusy ? '进行中…' : '评价本学期课程'),
+          h('button', {
+            key: 'dry',
+            type: 'button',
+            disabled: courseBusy,
+            onClick: () => startCourseRun(true),
+            style: btnStyle(false, courseBusy),
+          }, '试运行（不提交）'),
+          courseMsg === '' ? null : h('span', {
+            key: 'msg',
+            style: { fontSize: 12, color: C.sub, lineHeight: 1.6 },
+          }, courseMsg),
+        ]),
       ]));
 
       if (disabled) {

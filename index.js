@@ -30,7 +30,7 @@ const DEFAULT_RUN_TIMES = ["20:30"];
 const DEFAULT_API_BASE = "https://wjiaowu.smu.edu.cn/dev-api";
 const DEFAULT_SUGGESTION = "课程内容充实，教学认真负责，受益匪浅。";
 
-import { runBrowserRun, collectWeChatTokens } from "./browser.js";
+import { runBrowserRun, runCourseRun, collectWeChatTokens } from "./browser.js";
 import z from "@deepseek-ai/schemastery";
 import fs from "node:fs";
 import os from "node:os";
@@ -760,6 +760,8 @@ const DEFAULTS = {
   apiBase: DEFAULT_API_BASE,
   runTimes: DEFAULT_RUN_TIMES,
   fourStarCount: 2,
+  // 期末评课程一次最多处理多少门（只在手动点按钮时用）
+  courseMaxPerRun: 20,
   lateAnswer: "否",
   suggestion: DEFAULT_SUGGESTION,
   fillSuggestion: true,
@@ -777,7 +779,7 @@ const DEFAULTS = {
   seedProfileFrom: "",
   readWeChatToken: true,
   suggestionEmptyRate: 0.35,
-  varyFourStar: true,
+  varyFourStar: false,
   suggestionFixed: false,
   suggestionPool: [],
   intervalMs: 120000,
@@ -985,7 +987,7 @@ export const Config = z.object({
     .description("错过定时点时，下次启动自动补跑"),
 
   fourStarCount: z.number().min(0).max(20).default(2).description("四星题目的数量"),
-  varyFourStar: z.boolean().default(true).description("四星数量随机浮动（更接近真人）"),
+  varyFourStar: z.boolean().default(false).description("四星数量是否随机浮动；关掉就固定为 fourStarCount 个"),
 
   lateAnswer: z.string().default("否").description("「老师是否迟到」选哪项"),
   dutyAnswer: z.string().default("无职务").description("「你担任的职务」选哪项"),
@@ -1273,6 +1275,34 @@ export async function apply(ctx, rawConfig = {}) {
     }
   };
 
+  /**
+   * 期末「评课程」：只在面板手动点按钮时跑，不进每日自动流程。
+   * 和 runOnce 共用 running 互斥锁，避免两个浏览器撞 profile。
+   */
+  const runCourseOnce = async (dryRun) => {
+    if (state.running) {
+      return {
+        ok: false,
+        evaluated: 0,
+        pending: 0,
+        message: "已有评课任务在进行，等它结束再试",
+        details: [],
+        busy: true,
+      };
+    }
+    state.running = true;
+    try {
+      const cfg = { ...config, dryRun: dryRun === true, skipSubmit: dryRun === true || config.skipSubmit };
+      log("info", `开始评课程（${cfg.skipSubmit ? "试运行，不提交" : "正式提交"}）`);
+      const result = await runCourseRun(cfg, log);
+      state.lastCourseRun = nowIso();
+      state.lastCourseResult = result;
+      if (result.tokenInvalid) startTokenWatch(10);
+      return result;
+    } finally {
+      state.running = false;
+    }
+  };
   /**
    * 跑一轮，供「工具 / 配置面板的立即执行 / HTTP 端点」共用。
    * 同一时间只允许跑一次：两个浏览器自动化并发会互相抢 profile 和页面焦点。
@@ -1594,6 +1624,26 @@ export async function apply(ctx, rawConfig = {}) {
             });
           }
 
+          // 期末评课程：面板上的「评价课程」按钮调这里，平时自动流程不会碰它。
+          if (req.method === "POST" && url.pathname === `${WEB_ROUTE}/course/evaluate`) {
+            if (state.running) {
+              return sendJson(res, 409, { ok: false, error: "已有任务在跑，等它结束" });
+            }
+            const body = await readJsonBody(req);
+            const dryRun = body && body.dryRun === true;
+            const result = await runCourseOnce(dryRun);
+            return sendJson(res, result.ok ? 200 : 500, {
+              ok: !!result.ok,
+              data: {
+                ok: !!result.ok,
+                evaluated: result.evaluated || 0,
+                pending: result.pending || 0,
+                message: result.message || "",
+                details: Array.isArray(result.details) ? result.details : [],
+              },
+              error: result.ok ? undefined : result.message,
+            });
+          }
           // 用微信浮窗刷新 Token：面板「刷新 Token」按钮调这里。
           if (req.method === "POST" && url.pathname === `${WEB_ROUTE}/token/refresh-wechat`) {
             if (state.running) {
