@@ -22,7 +22,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const DATA_DIR = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "smueval-bot");
@@ -35,6 +35,7 @@ const wantCheck = args.has("--check");
 const forceDryRun = args.has("--dry-run");
 const wantJitter = args.has("--jitter");
 const wantRefreshToken = args.has("--refresh-token");
+const wantTestNotify = args.has("--test-notify");
 
 function log(level, message) {
   const line = `[${new Date().toISOString()}] [${level}] ${message}`;
@@ -75,6 +76,27 @@ async function sleepJitter(minutes) {
 }
 
 const WECHAT_SCRIPT = fileURLToPath(new URL("./wechat-token.ps1", import.meta.url));
+const NOTIFY_SCRIPT = fileURLToPath(new URL("./notify.ps1", import.meta.url));
+
+/**
+ * 桌面提醒：DSH 没开的时候跑失败，光写日志没人看得到。
+ * 用 detached 起一个弹窗进程，主流程立刻返回，不占着计划任务。
+ */
+function notify(title, message, level = "error") {
+  // 用同步调用：detached 启动的进程初始 show state 是 SW_HIDE，窗体看不见，
+  // 所以这里等它把窗口显示出来并自动关闭（默认 20 秒）再继续。
+  try {
+    if (!fs.existsSync(NOTIFY_SCRIPT)) return;
+    execFileSync(
+      "powershell.exe",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", NOTIFY_SCRIPT,
+        "-Title", title, "-Message", message, "-Level", level, "-Seconds", "20"],
+      { timeout: 60000, windowsHide: true, stdio: "ignore" }
+    );
+  } catch {
+    // 提醒失败不影响主流程
+  }
+}
 
 function runWeChatScript() {
   return new Promise((resolve) => {
@@ -112,7 +134,9 @@ async function refreshTokenStandalone(config) {
     }
   }
   if (!parsed || !parsed.ok) {
-    log("warn", `微信续期失败：${(parsed && parsed.error) || (err && err.message) || "无输出"}`);
+    const reason = (parsed && parsed.error) || (err && err.message) || "无输出";
+    log("warn", `微信续期失败：${reason}`);
+    notify("南医大评课助手 · Token 续期失败", reason, "error");
     return "";
   }
   log("info", `微信操作完成：${parsed.matched} @ (${parsed.clickedX},${parsed.clickedY})，关闭窗口 ${parsed.closed || 0} 个`);
@@ -149,6 +173,12 @@ async function main() {
       ...config,
       token: config.token ? "(已配置，长度 " + String(config.token).length + ")" : "(空，将自动从微信/浏览器继承)",
     }, null, 2));
+    return 0;
+  }
+
+  if (wantTestNotify) {
+    notify("南医大评课助手 · 测试提醒", "这是一条测试通知：评课失败时就会弹这个样子。", "error");
+    log("info", "已弹出测试提醒");
     return 0;
   }
 
@@ -205,6 +235,9 @@ async function main() {
   writeResult(result);
 
   log(result.ok ? "info" : "error", `${result.ok ? "✅" : "❌"} ${result.message || "（无说明）"}`);
+  if (!result.ok) {
+    notify("南医大评课助手 · 评课失败", result.message || "未知原因", "error");
+  }
   return result.ok ? 0 : 1;
 }
 
@@ -213,6 +246,7 @@ main()
   .catch((error) => {
     const message = error && error.message ? error.message : String(error);
     log("error", `运行失败：${message}`);
+    notify("南医大评课助手 · 运行失败", message, "error");
     try {
       writeResult({
         ok: false,
