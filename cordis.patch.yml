@@ -1,0 +1,56 @@
+# smueval-bot 默认配置（安装后可在 设置 → 插件 里改）
+# 所有路径都自动探测，不需要手动填；换电脑可以直接用。
+- insert:
+    - id: smueval-bot
+      name: '@local/smueval-bot'
+      config:
+        enabled: true
+        # browser = 真实浏览器点击（推荐）；api = 直接调接口（快，但指纹明显）
+        mode: browser
+
+        # Token 可以不填：插件会自动从「电脑版微信」和「本机浏览器」里找最新的
+        # 只有在两个来源都失效时才需要手工填
+        token: ''
+
+        apiBase: https://wjiaowu.smu.edu.cn/dev-api
+
+        # 每天只跑一次，实际触发时间 = 20:30 ± 30 分钟
+        runTimes: ['20:30']
+        runJitterMinutes: 30
+        # 一次同时处理「今天」和「昨天」（评课时效是当天和第二天）
+        lookbackDays: 1
+        # 定时点电脑没开时，下次启动自动补跑
+        catchUpOnStart: true
+
+        tabText: 随堂评
+        fourStarCount: 2
+        varyFourStar: true
+
+        lateAnswer: 否
+        dutyAnswer: 无职务
+        requirementAnswer: 按要求完成了学习
+        selfStudyAnswer: 课程学时30%以内
+
+        # 建议文本：随机抽，且约 35% 留空
+        suggestionFixed: false
+        suggestionEmptyRate: 0.35
+        fillSuggestion: true
+
+        # 试运行：只点不提交
+        dryRun: false
+
+        # 浏览器：窗口可见、用真实显示器参数
+        headless: false
+        useRealViewport: true
+        # windowSize 留空 = 用系统默认窗口大小（各机器屏幕不同，不要写死）
+        windowSize: ''
+        # 同步真实浏览器的历史/书签/Cookie，避免"全新空 profile"特征
+        seedProfile: true
+        # 从电脑版微信读取 Token（自动续期的主要来源）
+        readWeChatToken: true
+
+        intervalMs: 120000
+        jitterMs: 60000
+        maxPerRun: 10
+        maxAttempts: 3
+        retryBackoffMs: 30000

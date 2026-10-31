@@ -1,2 +1,146 @@
-# SMU-Automatic-In-class-Evaluation
-Support the implementation of in-class evaluations through the automatic system of the School of Medicine of Southern University
+# smueval-bot · 南医大随堂评价助手
+
+一个 DeepSeek Harness 插件：每天定时用**真实浏览器点击**的方式，自动完成南方医科大学
+「教学服务平台」（`wjiaowu.smu.edu.cn`）的**随堂评价**。
+
+- 默认每天 **20:30 ± 30 分钟**跑一次，一次把**今天 + 昨天**的课都评掉
+- 定时点电脑没开时，下次启动会**自动补跑**
+- 评分默认 **2 个四星 + 2 个五星**，四星数量与位置随机
+- 建议文本从模板池随机抽取，约 **35% 留空**（该题本身是选填）
+- Token 自动从**电脑版微信**读取，失效时无需手工复制
+
+---
+
+## 环境要求
+
+| 项目 | 要求 |
+|---|---|
+| 系统 | Windows（用到微信和 Chromium 浏览器的本地存储） |
+| DeepSeek Harness | 桌面版 |
+| 浏览器 | Microsoft Edge 或 Google Chrome（任一即可） |
+| 微信 | 电脑版微信（**必须是电脑版**，手机微信不行） |
+| 账号 | 南方医科大学在校生，且已在微信端绑定过教学服务平台 |
+
+---
+
+## 安装
+
+1. 把整个 `smueval-bot` 文件夹放到 DSH 的工作区目录下，例如：
+
+   ```
+   <工作区>\smueval-bot\
+   ```
+
+2. 在 DSH 里安装这个 bundle（它会自动 `pnpm install` 拉取 `playwright-core`）：
+
+   ```
+   plugin_manager install_bundle  <工作区>\smueval-bot
+   ```
+
+   安装完成后插件会自动启用，并在「插件」列表里出现三个工具：
+   `smueval-bot-runNow`、`smueval-bot-testConnection`、`smueval-bot-getStatus`
+
+---
+
+## 首次使用：登录一次
+
+装好后**不需要填任何 Token**，但需要让插件能找到你的登录态。任选一种：
+
+**方式 A（推荐，可长期自动续期）**
+
+在**电脑版微信**里打开一次 `https://wjiaowu.smu.edu.cn/` 并正常登录。
+之后插件会自己从微信的本地存储里读出 Token，Token 过期后再登录一次即可自动跟上。
+
+**方式 B（临时）**
+
+在你自己的浏览器里登录后，从 `localStorage` 复制 `Token`，填到插件配置的 `token` 字段。
+
+配好之后，先跑一次：
+
+```
+smueval-bot-testConnection
+```
+
+看到 `Token 有效 ✅ | 学期 ... | 可评 N 条` 就说明通了。
+
+然后可以先试运行一次（只点不提交）：
+
+```
+smueval-bot-runNow   dryRun = true
+```
+
+---
+
+## 配置说明
+
+**推荐用可视化配置窗口**：DSH →「设置」→「插件」→ 找到 `南医大评课助手`，
+所有选项都有中文说明、默认值和取值范围，改完即时生效，不需要编辑文件。
+
+也可以直接改 `cordis.patch.yml`。常改的几个：
+
+| 字段 | 说明 |
+|---|---|
+| `runTimes` | 运行时间，默认 `["20:30"]`，可写多个 |
+| `runJitterMinutes` | 时间随机浮动，默认 30（即 20:00–21:00 之间） |
+| `lookbackDays` | 往前补几天，默认 1（今天+昨天） |
+| `catchUpOnStart` | 错过定时点后启动补跑，默认开 |
+| `fourStarCount` | 四星题数量，默认 2 |
+| `varyFourStar` | 四星数量是否随机浮动，默认开 |
+| `suggestionEmptyRate` | 建议留空概率，默认 0.35 |
+| `dryRun` | 只点不提交，调试用 |
+| `headless` | 是否隐藏窗口，默认 `false`（可见更像真人） |
+| `mode` | `browser`（默认，真实点击）/ `api`（直接调接口） |
+
+`browserPath`、`profileDir`、`seedProfileFrom` 都可以留空，插件会自动探测。
+
+---
+
+## 查看状态
+
+```
+smueval-bot-getStatus
+```
+
+会显示：启用状态、Token 是否失效、运行次数、下次时间、上次结果，
+以及 **Token 最后一次有效校验时间 / 失效时间**（用来观察 Token 能撑多久）。
+
+如果显示 `Token：⚠️ 已失效`：
+
+> 去**电脑版微信**里打开一次 `wjiaowu.smu.edu.cn`，下次运行会自动继承新 Token。
+
+---
+
+## 原理简述
+
+登录态由学校服务端发放 `Token`，存在网页的 `localStorage` 里。插件按这个优先级取：
+
+1. **电脑版微信**的浏览器存储（leveldb）——你在微信里登录过就会更新
+2. **本机浏览器**（Edge/Chrome）的 profile——你平时浏览器里登录过就有
+3. 配置里的 `token` ——最后兜底
+
+拿到 Token 后，用 Playwright 启动你本机的真实浏览器，真实加载页面、
+真实鼠标点击、真实键盘输入，由网页自己发出请求。
+
+---
+
+## 常见问题
+
+**Q：提示「未找到可用的浏览器」**
+装 Edge 或 Chrome，或者在配置里用 `browserPath` 指定浏览器 exe 的完整路径。
+
+**Q：提示「所有 Token 均已失效」**
+在**电脑版微信**里打开一次 `wjiaowu.smu.edu.cn`。注意手机微信无效——手机上的数据不会写到这台电脑。
+
+**Q：窗口弹出来又关掉，什么都没评**
+看 `getStatus` 的结果。常见原因是当天没有可评课节（课时未结束会显示「时间未到」）。
+
+**Q：想完全自动，不想管 Token**
+技术上做不到：学校的登录是微信静默授权，只能在微信客户端内部触发，
+外部无法复现；该公众号也没有开放桌面扫码登录。手工点一次的方案已经是成本最低的了。
+
+---
+
+## 免责说明
+
+本插件通过自动化代替人工操作学校系统。使用前请自行确认这符合学校的相关规定，
+由此产生的一切后果由使用者自行承担。
