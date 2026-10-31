@@ -10,6 +10,8 @@ window.__ModuleLoader__.load({
     const ENTRY = 'smueval-bot';
     /** 本插件自己开的配置端点（Host 半侧注册，只监听回环）。 */
     const API = '/api/smueval-bot/config';
+    /** 立即执行一轮的端点。 */
+    const API_RUN = '/api/smueval-bot/run';
     /** 保存成功后广播，让同页的状态条立刻跟着刷新。 */
     const CONFIG_EVENT = 'smueval-bot:config-changed';
     /** 后台跑完（计划任务/定时器）时的轮询间隔：够及时，也不至于一直敲本机端点。 */
@@ -270,12 +272,36 @@ window.__ModuleLoader__.load({
       const [draft, setDraftState] = React.useState({});
       const [phase, setPhase] = React.useState('idle');
       const [message, setMessage] = React.useState('');
+      // 「立即执行」的状态：点下去到服务端回执出现之前，按钮都要禁用
+      const [runPending, setRunPending] = React.useState(false);
+      const runStartedAt = React.useRef('');
+      const lastConfigJson = React.useRef('');
 
+      // 只有配置真的变了才清空草稿；轮询刷新 state 时不要把用户正在改的内容清掉
       React.useEffect(() => {
+        const json = JSON.stringify((loaded.data && loaded.data.config) || {});
+        if (json === lastConfigJson.current) return;
+        lastConfigJson.current = json;
         setDraftState({});
         setPhase('idle');
         setMessage('');
       }, [loaded.data]);
+
+      // 评课进行中：每 3 秒问一次服务端，跑完自然停下
+      React.useEffect(() => {
+        if (!runPending) return undefined;
+        const tick = window.setInterval(() => loaded.reload(), 3000);
+        return () => window.clearInterval(tick);
+      }, [runPending]);
+
+      // 服务端回执比这次点击更新 → 说明已经跑完了
+      React.useEffect(() => {
+        if (!runPending) return;
+        const lastRun = (loaded.data && loaded.data.state && loaded.data.state.lastRun) || '';
+        const stillRunning = !!(loaded.data && loaded.data.state && loaded.data.state.running);
+        if (stillRunning) return;
+        if (runStartedAt.current === '' || lastRun >= runStartedAt.current) setRunPending(false);
+      }, [loaded.data, runPending]);
 
       if (props && props.view === 'summary') {
         const values = (loaded.data && loaded.data.config) || {};
@@ -300,6 +326,7 @@ window.__ModuleLoader__.load({
       const data = loaded.data || {};
       const values = data.config || {};
       const disabled = data.writable !== true;
+      const running = !!(data.state && data.state.running) || runPending;
       const dirtyKeys = Object.keys(draft).filter((key) => {
         const spec = FIELDS.find((item) => item.key === key);
         if (spec === undefined) return false;
@@ -359,6 +386,32 @@ window.__ModuleLoader__.load({
           });
       };
 
+      /** 立即跑一轮：试运行 = 只点不提交。会真的开浏览器，可能几十秒。 */
+      const startRun = (dryRun) => {
+        if (running) return;
+        runStartedAt.current = new Date().toISOString();
+        setRunPending(true);
+        setMessage('');
+        requestJson(API_RUN, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ dryRun: dryRun === true }),
+        })
+          .then((body) => {
+            if (body && body.ok === true) {
+              setMessage(dryRun ? '已开始试运行，跑完这里会显示结果…' : '已开始评课，跑完这里会显示结果…');
+              window.setTimeout(() => loaded.reload(), 1200);
+              return;
+            }
+            setRunPending(false);
+            setMessage((body && body.error) || '启动失败');
+          })
+          .catch((cause) => {
+            setRunPending(false);
+            setMessage('启动失败：' + String((cause && cause.message) || cause));
+          });
+      };
+
       const groups = [];
       for (const spec of FIELDS) {
         let group = groups.find((item) => item.name === spec.group);
@@ -370,6 +423,58 @@ window.__ModuleLoader__.load({
       }
 
       const children = [];
+      // 「立即执行」放在最上面：这是最常用的动作，不用先滚到底部
+      children.push(h('section', {
+        key: 'actions-run',
+        style: {
+          border: `1px solid ${C.border}`,
+          borderRadius: 8,
+          background: C.surfaceMuted,
+          padding: '10px 12px',
+          marginBottom: 10,
+        },
+      }, [
+        h('div', { key: 't', style: { fontSize: 13, fontWeight: 600, color: C.text } }, '立即执行'),
+        h('div', { key: 'h', style: { fontSize: 12, color: C.faint, marginTop: 2, lineHeight: 1.6 } },
+          running ? '正在跑，跑完这里会显示结果（会开一个浏览器窗口，别关它）。' : '手动跑一轮，不用等定时。会真的打开浏览器点页面，你可能看到鼠标自己在动。'),
+        h('div', { key: 'b', style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 } }, [
+          h('button', {
+            key: 'run',
+            type: 'button',
+            disabled: running,
+            onClick: () => startRun(false),
+            style: {
+              padding: '6px 16px',
+              fontSize: 13,
+              borderRadius: 6,
+              border: `1px solid ${C.border}`,
+              background: running ? C.surfaceMuted : C.link,
+              color: running ? C.sub : '#fff',
+              cursor: running ? 'default' : 'pointer',
+            },
+          }, running ? '执行中…' : '立即执行'),
+          h('button', {
+            key: 'dry',
+            type: 'button',
+            disabled: running,
+            onClick: () => startRun(true),
+            style: {
+              padding: '6px 12px',
+              fontSize: 13,
+              borderRadius: 6,
+              border: `1px solid ${C.border}`,
+              background: 'transparent',
+              color: running ? C.faint : C.sub,
+              cursor: running ? 'default' : 'pointer',
+            },
+          }, '试运行（不提交）'),
+          message === '' ? null : h('span', {
+            key: 'msg',
+            style: { fontSize: 12, color: phase === 'failed' ? C.danger : C.sub },
+          }, message),
+        ]),
+      ]));
+
       if (disabled) {
         children.push(h('div', {
           key: 'readonly',

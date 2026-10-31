@@ -926,7 +926,7 @@ export async function apply(ctx, rawConfig = {}) {
   const config = { ...DEFAULTS, ...rawConfig };
   const disposers = [];
 
-  let state = { lastRun: null, lastResult: null, runCount: 0, tokenInvalid: false };
+  let state = { lastRun: null, lastResult: null, runCount: 0, tokenInvalid: false, running: false };
 
   const log = (level, msg) => {
     console.log(`[${PLUGIN}] [${level}] ${msg}`);
@@ -1002,6 +1002,39 @@ export async function apply(ctx, rawConfig = {}) {
   };
   scheduleNext();
 
+  /**
+   * 跑一轮，供「工具 / 配置面板的立即执行 / HTTP 端点」共用。
+   * 同一时间只允许跑一次：两个浏览器自动化并发会互相抢 profile 和页面焦点。
+   */
+  const runOnce = async (dryRun) => {
+    if (state.running) {
+      return {
+        ok: false,
+        dryRun: !!dryRun,
+        evaluated: 0,
+        pending: 0,
+        total: 0,
+        message: "已有一次评课正在进行，等它结束再试",
+        startedAt: nowIso(),
+        finishedAt: nowIso(),
+        details: [],
+        busy: true,
+      };
+    }
+    state.running = true;
+    try {
+      const cfg = { ...config, dryRun: dryRun === undefined || dryRun === null ? config.dryRun : !!dryRun };
+      const result = await runEvaluation(cfg, log);
+      state.runCount += 1;
+      state.lastRun = result.startedAt;
+      state.lastResult = result;
+      state.tokenInvalid = !!result.tokenInvalid;
+      return result;
+    } finally {
+      state.running = false;
+    }
+  };
+
   // --- 开机补跑 ---
   // 场景：定时点（晚上 8 点多）电脑没开，等再开机时当天已经错过。
   // 只要「今天该跑的时间已过」且「今天还没跑过」，启动后延迟几分钟补一次。
@@ -1072,15 +1105,7 @@ export async function apply(ctx, rawConfig = {}) {
         },
       },
       async execute(input) {
-        const cfg = {
-          ...config,
-          dryRun: input && input.dryRun !== undefined ? input.dryRun : config.dryRun,
-        };
-        const result = await runEvaluation(cfg, log);
-        state.runCount += 1;
-        state.lastRun = result.startedAt;
-        state.lastResult = result;
-        state.tokenInvalid = !!result.tokenInvalid;
+        const result = await runOnce(input && input.dryRun !== undefined ? input.dryRun : config.dryRun);
         return {
           ok: !!result.ok,
           dryRun: !!result.dryRun,
@@ -1266,6 +1291,7 @@ export async function apply(ctx, rawConfig = {}) {
                   const last = useFile ? persisted : null;
                   return {
                     runCount: state.runCount || 0,
+                    running: !!state.running,
                     lastRun: (last && (last.finishedAt || last.startedAt)) || state.lastRun || "",
                     lastResult: last || state.lastResult || {},
                     lastSource: (last && last.source) || (state.lastResult ? "dsh" : ""),
@@ -1275,6 +1301,26 @@ export async function apply(ctx, rawConfig = {}) {
                 })(),
               },
             });
+          }
+
+          // 立即执行：面板上的「立即执行 / 试运行」按钮调这里。
+          // 评课要真的开浏览器点页面，可能几十秒，所以先回 started，客户端自己轮询 running。
+          if (req.method === "POST" && url.pathname === `${WEB_ROUTE}/run`) {
+            if (state.running) {
+              return sendJson(res, 409, { ok: false, error: "已有一次评课正在进行，等它结束再试" });
+            }
+            const body = await readJsonBody(req);
+            const dryRun = body && body.dryRun === true;
+            sendJson(res, 200, { ok: true, data: { started: true, dryRun } });
+            Promise.resolve()
+              .then(() => runOnce(dryRun))
+              .then((result) => {
+                log("info", `面板立即执行：${result.ok ? "✅" : "❌"} ${result.message || ""}`);
+              })
+              .catch((err) => {
+                log("error", `面板立即执行异常：${err && err.message ? err.message : err}`);
+              });
+            return undefined;
           }
 
           if (req.method === "POST" && url.pathname === `${WEB_ROUTE}/config`) {
