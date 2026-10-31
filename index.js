@@ -427,8 +427,166 @@ const DEFAULTS = {
   userAgent: "",
 };
 
-// ---------- 配置 Schema（DSH 设置界面据此渲染可视化配置窗口）----------
+// ---------- 配置端点（给插件页的配置面板读写用）----------
+//
+// 为什么不走 DSH 的 settings 面板：面板只投影 Config 里标了 .volatile() 的字段，
+// 而 volatile 值在运行时会变成 cosmokit 的 Volatile 引用（对象里带函数），
+// 一旦被结构化克隆就抛 "() => current could not be cloned"，会把整轮对话弄挂。
+// 所以本插件自己开一条回环 HTTP 端点，面板直连它读写配置。
 
+/** 本插件配置端点的路径前缀。 */
+const WEB_ROUTE = "/api/smueval-bot";
+/** 已注册过该路径的实例（Loader 重放/多实例时避免重复注册）。 */
+const ROUTE_OWNED = new Set();
+/** 只信任本机回环。 */
+const LOOPBACK = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+/** 本插件的 loader 条目 id（cordis.patch.yml 里 insert 的 id）。 */
+const ENTRY_ID = PLUGIN;
+
+/**
+ * 读自己的包名：面板挂点是按安装时的包名派发的，发布成别的名字时不能写死。
+ * 读不到就退回默认名，不影响本机使用。
+ */
+function readPackageName() {
+  try {
+    const file = new URL("./package.json", import.meta.url);
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (typeof parsed.name === "string" && parsed.name !== "") return parsed.name;
+  } catch {
+    // 打包/压缩环境下读不到就用默认值
+  }
+  return "@local/smueval-bot";
+}
+
+const PACKAGE_NAME = readPackageName();
+
+/** 在配置条目里找本插件那一行：先按 id，再按包名兜底（不同 DSH 版本 entries() 的形状可能不同）。 */
+function findOwnEntry(editor) {
+  const rows = editor.entries();
+  const byId = rows.find((row) => row?.options?.id === ENTRY_ID);
+  if (byId !== undefined) return byId;
+  const wanted = [PACKAGE_NAME, PACKAGE_NAME.split("/").pop()].filter(Boolean);
+  return rows.find((row) => {
+    const name = String(row?.options?.name ?? "");
+    return wanted.some((candidate) => name === candidate) || name.endsWith("/" + ENTRY_ID);
+  });
+}
+
+
+function sendJson(res, code, body) {
+  res.writeHead(code, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+  res.end(JSON.stringify(body));
+}
+
+/** 从 Host 头取主机名：同时支持 example.com:3080 与 [::1]:3080。 */
+function hostNameOf(value) {
+  const raw = String(value ?? "").trim().toLowerCase();
+  if (!raw) return "";
+  if (raw.startsWith("[")) {
+    const close = raw.indexOf("]");
+    return close >= 0 ? raw.slice(0, close + 1) : raw;
+  }
+  const colon = raw.lastIndexOf(":");
+  return colon >= 0 && /^\d+$/.test(raw.slice(colon + 1)) ? raw.slice(0, colon) : raw;
+}
+
+/** 同源闸：挡 DNS rebinding 与跨站写；桌面壳层同源 fetch 不带 Origin，按 sec-fetch-site 判。 */
+function sameOriginBlocked(req) {
+  const peer = String(req.socket?.remoteAddress || "");
+  if (peer && !/^(::1|::ffff:127\.|127\.)/.test(peer)) {
+    return `非本机请求被拒绝（对端地址 ${peer} 不是回环）`;
+  }
+  const host = hostNameOf(req.headers?.host);
+  if (!LOOPBACK.has(host)) return "非本机请求被拒绝（Host 必须是回环地址）";
+  const method = String(req.method || "GET").toUpperCase();
+  const mutating = method !== "GET" && method !== "HEAD";
+  const origin = req.headers?.origin;
+  const site = req.headers?.["sec-fetch-site"];
+  if (mutating && !origin) {
+    if (site === "cross-site" || site === "same-site") {
+      return `跨站写请求被拒绝（缺少 Origin 且 sec-fetch-site=${site}）`;
+    }
+  }
+  if (origin) {
+    let originHost = "";
+    try {
+      originHost = new URL(origin).hostname;
+    } catch {
+      return "非法 Origin 头";
+    }
+    if (originHost !== host && !(LOOPBACK.has(host) && LOOPBACK.has(originHost))) return "跨源访问被拒绝";
+  }
+  if (mutating) {
+    const ct = String(req.headers?.["content-type"] || "").split(";")[0].trim().toLowerCase();
+    if (ct !== "application/json") {
+      return `跨站写请求被拒绝（Content-Type 必须是 application/json，收到：${ct || "无"}）`;
+    }
+  }
+  if (site && site !== "same-origin" && site !== "none") return `跨站请求被拒绝（sec-fetch-site=${site}）`;
+  return null;
+}
+
+/** 读小 JSON body；读不到就给 {}。 */
+function readJsonBody(req) {
+  return new Promise((resolve) => {
+    let raw = "";
+    req.on("data", (chunk) => {
+      raw += chunk;
+      if (raw.length > 65536) req.destroy();
+    });
+    req.on("end", () => {
+      try {
+        resolve(JSON.parse(raw));
+      } catch {
+        resolve({});
+      }
+    });
+    req.on("error", () => resolve({}));
+  });
+}
+
+/** 面板可读的配置视图：Token 不回明文，只报「是否已配置」。 */
+function publicConfig(config) {
+  const view = { ...config };
+  view.tokenConfigured = typeof config.token === "string" && config.token.trim() !== "";
+  view.token = "";
+  return view;
+}
+
+/** 按默认值类型收窄一份补丁，只保留认识的字，防止面板写进奇怪的形状。 */
+function sanitizePatch(patch) {
+  const out = {};
+  for (const [key, value] of Object.entries(patch || {})) {
+    if (!Object.prototype.hasOwnProperty.call(DEFAULTS, key)) continue;
+    const like = DEFAULTS[key];
+    if (Array.isArray(like)) {
+      if (!Array.isArray(value)) continue;
+      out[key] = value.map((item) => String(item)).filter((item) => item !== "").slice(0, 12);
+      continue;
+    }
+    if (typeof like === "boolean") {
+      out[key] = value === true || value === "true";
+      continue;
+    }
+    if (typeof like === "number") {
+      const num = Number(value);
+      if (Number.isFinite(num)) out[key] = num;
+      continue;
+    }
+    if (typeof value === "string") out[key] = value.slice(0, 4096);
+  }
+  return out;
+}
+
+
+
+// ---------- 配置 Schema（DSH 据此投影设置文档；本插件的编辑走上面的自建端点）----------
+
+// 注意：不要给这些字段加 .volatile()。
+// DSH 的设置面板只投影 volatile 字段，但 volatile 字段在运行时会被包装成
+// cosmokit 的 Volatile 引用（对象里带函数），一旦被结构化克隆就会抛
+// "() => current could not be cloned"，把整轮对话弄挂。所以本插件改配置走
+// cordis.patch.yml，不在设置面板里编辑。
 export const Config = z.object({
   enabled: z.boolean().default(true).description("启用自动评课"),
   mode: z
@@ -792,6 +950,90 @@ export async function apply(ctx, rawConfig = {}) {
   );
 
   disposers.push(...toolDisposers);
+
+  // --- 配置端点：插件页的配置面板读写这里 ---
+  ctx.inject(["webServer"], (child) => {
+    if (ROUTE_OWNED.has(WEB_ROUTE)) return;
+    ROUTE_OWNED.add(WEB_ROUTE);
+    disposers.push(() => ROUTE_OWNED.delete(WEB_ROUTE));
+    disposers.push(
+      child.webServer.register({
+        kind: "prefix",
+        path: WEB_ROUTE,
+        handler: async (req, res) => {
+          const blocked = sameOriginBlocked(req);
+          if (blocked) return sendJson(res, 403, { ok: false, error: blocked });
+          let url;
+          try {
+            url = new URL(req.url, "http://127.0.0.1");
+          } catch {
+            return sendJson(res, 400, { ok: false, error: "非法请求地址" });
+          }
+
+          if (req.method === "GET" && url.pathname === `${WEB_ROUTE}/config`) {
+            const editor = ctx.get("configEditor");
+            let patchPath = "";
+            try {
+              patchPath = editor === undefined ? "" : String(editor.documentPath ?? "");
+            } catch {
+              patchPath = "";
+            }
+            return sendJson(res, 200, {
+              ok: true,
+              data: {
+                config: publicConfig(config),
+                defaults: publicConfig({ ...DEFAULTS, token: "" }),
+                entryId: ENTRY_ID,
+                packageName: PACKAGE_NAME,
+                patchPath,
+                writable: editor !== undefined,
+                state: {
+                  runCount: state.runCount || 0,
+                  lastRun: state.lastRun || "",
+                  lastResult: state.lastResult || {},
+                  tokenInvalid: !!state.tokenInvalid,
+                },
+              },
+            });
+          }
+
+          if (req.method === "POST" && url.pathname === `${WEB_ROUTE}/config`) {
+            const body = await readJsonBody(req);
+            const patch = sanitizePatch(body && typeof body.patch === "object" ? body.patch : {});
+            if (Object.keys(patch).length === 0) {
+              return sendJson(res, 400, { ok: false, error: "没有可写入的字段" });
+            }
+            const editor = ctx.get("configEditor");
+            if (editor === undefined) {
+              return sendJson(res, 503, {
+                ok: false,
+                error: "本部署没有配置编辑服务，请直接改 cordis.patch.yml",
+              });
+            }
+            const entry = findOwnEntry(editor);
+            if (entry === undefined) {
+              return sendJson(res, 409, {
+                ok: false,
+                error: `找不到配置条目（id=${ENTRY_ID} / 包名 ${PACKAGE_NAME}）；请直接改 cordis.patch.yml`,
+              });
+            }
+            // 先回包再写盘：写入会触发 Loader 重载本插件，连这条路由一起重建，
+            // 等它完成再回包多半连不上。面板收到 ok 后自己再拉一次配置。
+            sendJson(res, 200, { ok: true, data: { applying: true, fields: Object.keys(patch) } });
+            Promise.resolve()
+              .then(() => editor.edit(entry, (current) => ({ ...current, ...patch })))
+              .catch((err) => {
+                log("warn", `写配置失败：${err && err.message ? err.message : err}`);
+              });
+            return undefined;
+          }
+
+          return sendJson(res, 404, { ok: false, error: "未知端点" });
+        },
+      })
+    );
+    log("info", `配置端点已挂载：${WEB_ROUTE}`);
+  });
 
   return () => {
     if (scheduleDisposer) scheduleDisposer();
