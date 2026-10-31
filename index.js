@@ -31,6 +31,8 @@ const DEFAULT_API_BASE = "https://wjiaowu.smu.edu.cn/dev-api";
 const DEFAULT_SUGGESTION = "课程内容充实，教学认真负责，受益匪浅。";
 
 import { runBrowserRun, runCourseRun, collectWeChatTokens } from "./browser.js";
+import { ZhjwBrowserClient } from "./tools/zhjw-browser.mjs";
+import { ZhjwClient } from "./tools/zhjw-client.mjs";
 import z from "@deepseek-ai/schemastery";
 import fs from "node:fs";
 import os from "node:os";
@@ -207,7 +209,9 @@ function findNodeExecutable() {
 function writeRunnerCmd() {
   ensureDataDir();
   const nodePath = findNodeExecutable();
-  const script = path.join(PLUGIN_DIR, "tools", "run-once.mjs");
+  // 统一走 dispatch.mjs：它运行时读当前 channel 再分派（wjiaowu / zhjw / auto），
+  // 所以用户在配置面板改了「评课途径」不需要重新注册计划任务，下次触发自动生效。
+  const script = path.join(PLUGIN_DIR, "tools", "dispatch.mjs");
   const body = [
     "@echo off",
     "chcp 65001 >nul",
@@ -792,6 +796,15 @@ const DEFAULTS = {
   showStatusBar: true,
   /** 是否注册 Windows 计划任务（DSH 不开也能跑）。 */
   systemTask: false,
+
+  // ---------- zhjw.smu.edu.cn 渠道（账号密码 + ONNX 验证码） ----------
+  channel: "wjiaowu",        // "wjiaowu" | "zhjw" | "auto"
+  zhjwAccount: "",           // 统一身份认证账号
+  zhjwPassword: "",          // 统一身份认证密码（本地存储，Base64 编码，非加密）
+  zhjwEnabled: false,        // 是否启用 zhjw 渠道（由 channel 自动派生：zhjw/auto 为 true）
+  zhjwMode: "browser",       // "browser"（浏览器键鼠模拟，推荐）| "http"（纯 HTTP）
+  zhjwMaxAttempts: 3,        // 单次运行最大尝试次数（含验证码失败重试）
+  zhjwRetryDelayMinutes: 15, // 验证码/登录失败后重试间隔（分钟）
 };
 
 // ---------- 配置端点（给插件页的配置面板读写用）----------
@@ -1069,6 +1082,8 @@ async function runEvaluation(config, log, source = "dsh") {
 
 export async function apply(ctx, rawConfig = {}) {
   const config = { ...DEFAULTS, ...rawConfig };
+  // zhjwEnabled 由 channel 派生：选 zhjw 或 auto 即启用 zhjw 渠道，不再单独暴露复选框
+  config.zhjwEnabled = config.channel === "zhjw" || config.channel === "auto";
   const disposers = [];
 
   let state = { lastRun: null, lastResult: null, runCount: 0, tokenInvalid: false, running: false, scanning: false, refreshingToken: false };
@@ -1670,6 +1685,7 @@ export async function apply(ctx, rawConfig = {}) {
           }
 
           // 立即执行：面板上的「立即执行 / 试运行」按钮调这里。
+          // 根据 config.channel 分派：zhjw 渠道走 run-zhjw.mjs（或内置 ZhjwBrowserClient），wjiaowu/auto 走 runOnce。
           // 评课要真的开浏览器点页面，可能几十秒，所以先回 started，客户端自己轮询 running。
           if (req.method === "POST" && url.pathname === `${WEB_ROUTE}/run`) {
             if (state.running) {
@@ -1677,7 +1693,55 @@ export async function apply(ctx, rawConfig = {}) {
             }
             const body = await readJsonBody(req);
             const dryRun = body && body.dryRun === true;
-            sendJson(res, 200, { ok: true, data: { started: true, dryRun } });
+            const channel = String(config.channel || "wjiaowu");
+
+            if (channel === "zhjw") {
+              if (!config.zhjwEnabled) {
+                return sendJson(res, 400, { ok: false, error: "zhjw 渠道未启用，请先在设置中打开「启用 zhjw 渠道」" });
+              }
+              if (!config.zhjwAccount || !config.zhjwPassword) {
+                return sendJson(res, 400, { ok: false, error: "zhjw 账号或密码未配置，请在设置中填写统一身份认证账号密码" });
+              }
+              sendJson(res, 200, { ok: true, data: { started: true, dryRun, channel: "zhjw" } });
+              const zhjwLog = (level, msg) => {
+                log(level, `[zhjw] ${msg}`);
+                try {
+                  ensureDataDir();
+                  fs.appendFileSync(
+                    RUN_LOG,
+                    `[${new Date().toISOString()}] [${level}] [zhjw] ${msg}\n`,
+                    "utf8"
+                  );
+                } catch {}
+              };
+              Promise.resolve()
+                .then(() => {
+                  // 默认用浏览器键鼠模拟（更真实）；body.http=true 可切回纯 HTTP 模式
+                  const useHttp = body && body.http === true;
+                  const ClientClass = useHttp ? ZhjwClient : ZhjwBrowserClient;
+                  zhjwLog("info", `模式：${useHttp ? "纯 HTTP" : "浏览器键鼠模拟"}`);
+                  const client = new ClientClass({
+                    account: config.zhjwAccount,
+                    password: config.zhjwPassword,
+                    log: zhjwLog,
+                    config: config,
+                  });
+                  return client.run({
+                    maxAttempts: config.zhjwMaxAttempts || 3,
+                    dryRun: !!dryRun,
+                  });
+                })
+                .then((result) => {
+                  zhjwLog("info", `${result.ok ? "✅" : "❌"} ${result.message || ""}`);
+                })
+                .catch((err) => {
+                  zhjwLog("error", `异常：${err && err.message ? err.message : err}`);
+                });
+              return undefined;
+            }
+
+            // wjiaowu / auto 渠道：走随堂评价流程
+            sendJson(res, 200, { ok: true, data: { started: true, dryRun, channel: "wjiaowu" } });
             Promise.resolve()
               .then(() => runOnce(dryRun))
               .then((result) => {
@@ -1687,6 +1751,73 @@ export async function apply(ctx, rawConfig = {}) {
                 log("error", `面板立即执行异常：${err && err.message ? err.message : err}`);
               });
             return undefined;
+          }
+
+          // zhjw 渠道：运行一次 zhjw 评课（账号密码 + ONNX 验证码）
+          if (req.method === "POST" && url.pathname === `${WEB_ROUTE}/zhjw/run`) {
+            if (state.running) {
+              return sendJson(res, 409, { ok: false, error: "已有一次评课正在进行，等它结束再试" });
+            }
+            const body = await readJsonBody(req);
+            const dryRun = body && body.dryRun === true;
+            if (!config.zhjwEnabled) {
+              return sendJson(res, 400, { ok: false, error: "zhjw 渠道未启用，请先在设置中打开「启用 zhjw 渠道」" });
+            }
+            if (!config.zhjwAccount || !config.zhjwPassword) {
+              return sendJson(res, 400, { ok: false, error: "zhjw 账号或密码未配置，请在设置中填写统一身份认证账号密码" });
+            }
+            sendJson(res, 200, { ok: true, data: { started: true, dryRun } });
+            // zhjw 运行日志同时写 run.log，便于在 DSH 外部查看与排障
+            const zhjwLog = (level, msg) => {
+              log(level, `[zhjw] ${msg}`);
+              try {
+                ensureDataDir();
+                fs.appendFileSync(
+                  RUN_LOG,
+                  `[${new Date().toISOString()}] [${level}] [zhjw] ${msg}\n`,
+                  "utf8"
+                );
+              } catch {}
+            };
+            Promise.resolve()
+              .then(() => {
+                // 默认用浏览器键鼠模拟（更真实）；body.http=true 可切回纯 HTTP 模式
+                const useHttp = body && body.http === true;
+                const ClientClass = useHttp ? ZhjwClient : ZhjwBrowserClient;
+                zhjwLog("info", `模式：${useHttp ? "纯 HTTP" : "浏览器键鼠模拟"}`);
+                const client = new ClientClass({
+                  account: config.zhjwAccount,
+                  password: config.zhjwPassword,
+                  log: zhjwLog,
+                  config: config,
+                });
+                return client.run({
+                  maxAttempts: config.zhjwMaxAttempts || 3,
+                  dryRun: !!dryRun,
+                });
+              })
+              .then((result) => {
+                zhjwLog("info", `${result.ok ? "✅" : "❌"} ${result.message || ""}`);
+              })
+              .catch((err) => {
+                zhjwLog("error", `异常：${err && err.message ? err.message : err}`);
+              });
+            return undefined;
+          }
+
+          // zhjw 渠道：检查配置
+          if (req.method === "POST" && url.pathname === `${WEB_ROUTE}/zhjw/check`) {
+            return sendJson(res, 200, {
+              ok: true,
+              data: {
+                channel: config.channel,
+                zhjwEnabled: config.zhjwEnabled === true,
+                zhjwAccount: config.zhjwAccount || "(空)",
+                zhjwPassword: config.zhjwPassword ? "(已配置)" : "(空)",
+                zhjwMaxAttempts: config.zhjwMaxAttempts || 3,
+                zhjwRetryDelayMinutes: config.zhjwRetryDelayMinutes || 15,
+              },
+            });
           }
 
           if (req.method === "POST" && url.pathname === `${WEB_ROUTE}/config`) {

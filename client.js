@@ -86,6 +86,20 @@ window.__ModuleLoader__.load({
 
       { group: '界面', key: 'showStatusBar', label: '显示底部状态条', hint: '关掉后聊天输入框下方不再显示「南医大评课助手 · 每天 20:30」。', type: 'bool' },
       { group: '界面', key: 'systemTask', label: '注册 Windows 计划任务', hint: '打开后即使没开 DSH 也会自动评课，DSH 内的定时器会主动让位，避免同一天跑两遍。计划任务在整点启动，再随机等 runJitterMinutes 分钟（仅 browser 模式）。', type: 'bool' },
+
+      { group: '评渠道', key: 'channel', label: '评课途径', hint: 'wjiaowu = 用微信 Token 浮窗登录（推荐）；zhjw = 用统一身份认证账号密码 + 验证码（备选）；auto = 优先 wjiaowu，失败自动尝试 zhjw。', type: 'select', options: [
+        { value: 'wjiaowu', label: 'wjiaowu（微信 Token，推荐）' },
+        { value: 'zhjw', label: 'zhjw（账号密码 + 验证码）' },
+        { value: 'auto', label: '自动切换（优先 wjiaowu，失败尝试 zhjw）' },
+      ] },
+      { group: '评渠道', key: 'zhjwAccount', label: '统一身份认证账号', hint: '学号或工号，与 wjiaowu 同一套账号体系。', type: 'text', placeholder: '学号/工号' },
+      { group: '评渠道', key: 'zhjwPassword', label: '统一身份认证密码', hint: '仅保存在本地配置文件中（Base64 编码，非加密），不上传任何服务器。', type: 'text', placeholder: '密码（仅本地保存）' },
+      { group: '评渠道', key: 'zhjwMode', label: '登录方式', hint: '浏览器键鼠模拟更真实；纯 HTTP 更快但指纹较弱。', type: 'select', options: [
+        { value: 'browser', label: '浏览器键鼠模拟（推荐）' },
+        { value: 'http', label: '纯 HTTP 请求' },
+      ] },
+      { group: '评渠道', key: 'zhjwMaxAttempts', label: '最大尝试次数', hint: '验证码/登录失败后最多重试几次。', type: 'number', placeholder: '3' },
+      { group: '评渠道', key: 'zhjwRetryDelayMinutes', label: '失败重试间隔（分钟）', hint: '验证码或登录失败后等多久再试。', type: 'number', placeholder: '15' },
     ];
 
     const GROUP_HINT = {
@@ -94,6 +108,7 @@ window.__ModuleLoader__.load({
       登录: 'Token 一般不用管，插件会自己去电脑版微信里找。',
       浏览器: '看得见的点击比接口调用更难被识别，默认就用浏览器。',
       界面: '插件在 DSH 界面里露不露面、要不要脱离 DSH 运行。',
+      评渠道: '选择用哪个入口评课：wjiaowu 是微信 Token 自动登录，zhjw 是统一身份认证账号密码 + ONNX 验证码，作为备选。',
     };
 
     function textOf(spec, value) {

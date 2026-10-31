@@ -5,6 +5,7 @@ node_modules/
 *.log
 *.state.json
 smueval-*-profile/
+config.json
 
 # 操作系统
 .DS_Store
