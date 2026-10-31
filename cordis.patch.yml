@@ -54,3 +54,6 @@
         maxPerRun: 10
         maxAttempts: 3
         retryBackoffMs: 30000
+
+        # 是否在会话输入框下方显示「南医大评课助手 · 每天 20:30」状态条
+        showStatusBar: true

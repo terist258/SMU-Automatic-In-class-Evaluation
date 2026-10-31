@@ -425,6 +425,8 @@ const DEFAULTS = {
   maxAttempts: 3,
   retryBackoffMs: 30000,
   userAgent: "",
+  /** 是否在会话输入框下方显示状态条。 */
+  showStatusBar: true,
 };
 
 // ---------- 配置端点（给插件页的配置面板读写用）----------
@@ -665,6 +667,12 @@ export const Config = z.object({
   maxPerRun: z.number().min(1).max(50).default(10).description("每轮最多处理多少条"),
   maxAttempts: z.number().min(1).max(10).default(3).description("失败重试次数"),
   retryBackoffMs: z.number().min(0).default(30000).description("重试退避（毫秒）"),
+
+  // 界面
+  showStatusBar: z
+    .boolean()
+    .default(true)
+    .description("在会话输入框下方显示状态条（南医大评课助手 · 每天 20:30）"),
 
   // 以下几项属于高级/排障用途，一般不用动
   edgePath: z.string().default("").description("（高级）等同 browserPath，保留兼容"),

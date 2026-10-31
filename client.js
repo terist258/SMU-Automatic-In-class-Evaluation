@@ -10,6 +10,8 @@ window.__ModuleLoader__.load({
     const ENTRY = 'smueval-bot';
     /** 本插件自己开的配置端点（Host 半侧注册，只监听回环）。 */
     const API = '/api/smueval-bot/config';
+    /** 保存成功后广播，让同页的状态条立刻跟着刷新。 */
+    const CONFIG_EVENT = 'smueval-bot:config-changed';
 
     // 只用 DSH 真实存在的主题 token（浅色/深色各自有值），并给浅色兜底。
     // 之前写的是 --dsw-alias-bg-input / --dsw-alias-label-tertiary 这类不存在的
@@ -67,6 +69,8 @@ window.__ModuleLoader__.load({
       { group: '浏览器', key: 'headless', label: '后台静默运行', hint: '关闭 = 显示窗口，能看到它自己点。', type: 'bool' },
       { group: '浏览器', key: 'useRealViewport', label: '使用真实窗口尺寸', type: 'bool' },
       { group: '浏览器', key: 'seedProfile', label: '同步本机浏览器资料', hint: '复制历史记录和 Cookie，避免「全新空 profile」特征。', type: 'bool' },
+
+      { group: '界面', key: 'showStatusBar', label: '显示底部状态条', hint: '关掉后聊天输入框下方不再显示「南医大评课助手 · 每天 20:30」。', type: 'bool' },
     ];
 
     const GROUP_HINT = {
@@ -74,6 +78,7 @@ window.__ModuleLoader__.load({
       评分: '打几星、建议写不写、各道单选题选哪一项。',
       登录: 'Token 一般不用管，插件会自己去电脑版微信里找。',
       浏览器: '看得见的点击比接口调用更难被识别，默认就用浏览器。',
+      界面: '插件在 DSH 界面里露不露面。',
     };
 
     function textOf(spec, value) {
@@ -125,6 +130,15 @@ window.__ModuleLoader__.load({
       });
     }
 
+    /** 保存成功后广播一次，让同页的状态条立即重读配置。 */
+    function notifyConfigChanged() {
+      try {
+        window.dispatchEvent(new Event(CONFIG_EVENT));
+      } catch {
+        // 没有 window 就算了
+      }
+    }
+
     /** 读一次配置；组件里用，失败给出可读原因。 */
     function useConfig() {
       const [state, setState] = React.useState({ phase: 'loading', data: null, error: null });
@@ -142,8 +156,20 @@ window.__ModuleLoader__.load({
             if (!live) return;
             setState({ phase: 'failed', data: null, error: String((cause && cause.message) || cause) });
           });
+        // 面板保存成功后广播，状态条不必等下一轮会话就跟着变
+        const bump = () => setNonce((value) => value + 1);
+        try {
+          window.addEventListener(CONFIG_EVENT, bump);
+        } catch {
+          // 没有 window 就算了
+        }
         return () => {
           live = false;
+          try {
+            window.removeEventListener(CONFIG_EVENT, bump);
+          } catch {
+            // 忽略
+          }
         };
       }, [nonce]);
       return { ...state, reload: () => setNonce((value) => value + 1) };
@@ -302,6 +328,7 @@ window.__ModuleLoader__.load({
             if (body && body.ok === true) {
               setPhase('applied');
               setMessage('已保存，正在重载插件…');
+              notifyConfigChanged();
               window.setTimeout(() => {
                 loaded.reload();
               }, 1600);
@@ -314,6 +341,7 @@ window.__ModuleLoader__.load({
             // 写入会重载插件并重建路由，回包可能直接断在这里；等同于已提交。
             setPhase('applied');
             setMessage('已提交，正在重载插件…');
+            notifyConfigChanged();
             window.setTimeout(() => {
               loaded.reload();
             }, 1600);
@@ -424,10 +452,11 @@ window.__ModuleLoader__.load({
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4, marginTop: 4 } }, children);
     }
 
-    /** 会话输入框下方的状态条。 */
+    /** 会话输入框下方的状态条；配置里关掉 showStatusBar 就整个不渲染。 */
     function EvalStatus() {
       const loaded = useConfig();
       const values = (loaded.data && loaded.data.config) || {};
+      if (values.showStatusBar === false) return null;
       const times = Array.isArray(values.runTimes) && values.runTimes.length > 0 ? values.runTimes.join(' / ') : null;
       const label = values.enabled === false ? '已暂停' : (times === null ? '已启用' : `每天 ${times}`);
       return h('div', {
