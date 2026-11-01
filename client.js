@@ -336,6 +336,44 @@ window.__ModuleLoader__.load({
         }));
       }
 
+      if (spec.type === 'token') {
+        const [showPassword, setShowPassword] = React.useState(false);
+        const shown = draft === undefined ? textOf(spec, value) : draft;
+        return rowShell(spec, h('div', {
+          key: 'k',
+          style: { display: 'flex', alignItems: 'center', gap: 6 },
+        }, [
+          h('input', {
+            key: 'i',
+            type: showPassword ? 'text' : 'password',
+            value: shown,
+            disabled,
+            inputMode: 'text',
+            placeholder: (tokenConfigured || passwordConfigured)
+              ? '已保存（留空不改）'
+              : (spec.placeholder || ''),
+            onChange: (event) => setDraft(spec.key, event.target.value),
+            style: { ...inputStyle, flex: 1 },
+          }),
+          h('button', {
+            key: 't',
+            type: 'button',
+            disabled,
+            onClick: () => setShowPassword(!showPassword),
+            style: {
+              padding: '5px 8px',
+              fontSize: 12,
+              borderRadius: 6,
+              border: `1px solid ${C.borderStrong}`,
+              background: disabled ? C.surfaceMuted : 'transparent',
+              color: disabled ? C.faint : C.sub,
+              cursor: disabled ? 'default' : 'pointer',
+            },
+            title: showPassword ? '隐藏密码' : '显示密码',
+          }, showPassword ? '🙈' : '👁️'),
+        ]));
+      }
+
       const shown = draft === undefined ? textOf(spec, value) : draft;
       return rowShell(spec, h('input', {
         key: 'k',
