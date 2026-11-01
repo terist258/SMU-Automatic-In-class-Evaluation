@@ -57,13 +57,15 @@ window.__ModuleLoader__.load({
     };
 
     const FIELDS = [
+      // === 运行/定时 ===
       { group: '运行', key: 'enabled', label: '定时评课', hint: '关闭后不再自动运行；手动工具仍然可用。', type: 'bool' },
       { group: '运行', key: 'runTimes', label: '每天运行时间', hint: '24 小时制，多个时间用逗号隔开，例如 12:00, 20:30。', type: 'times', placeholder: '20:30' },
       { group: '运行', key: 'runJitterMinutes', label: '时间随机浮动（分钟）', hint: '实际触发 = 设定时间 ± 该分钟数，避免每天整点提交。', type: 'number' },
       { group: '运行', key: 'lookbackDays', label: '补评天数', hint: '0 = 只评今天；1 = 今天和昨天。', type: 'number' },
-      { group: '运行', key: 'dryRun', label: '试运行', hint: '只走一遍页面、不提交。', type: 'bool' },
       { group: '运行', key: 'catchUpOnStart', label: '错过就补跑', hint: '定时点电脑没开机时，下次启动补一次。', type: 'bool' },
+      { group: '运行', key: 'systemTask', label: '注册 Windows 计划任务', hint: '打开后即使没开 DSH 也会自动评课，DSH 内的定时器会主动让位，避免同一天跑两遍。', type: 'bool' },
 
+      // === 评分 ===
       { group: '评分', key: 'fourStarCount', label: '四星题数', hint: '4 道评分题里打四星的题数，其余五星。2 = 90 分。', type: 'number' },
       { group: '评分', key: 'varyFourStar', label: '四星位置随机', hint: '每节课随机挑哪几道打四星。', type: 'bool' },
       { group: '评分', key: 'fillSuggestion', label: '填写意见建议', hint: '关闭则建议栏一律留空。', type: 'bool' },
@@ -74,9 +76,11 @@ window.__ModuleLoader__.load({
       { group: '评分', key: 'requirementAnswer', label: '「学习要求」选项', type: 'text', placeholder: '按要求完成了学习' },
       { group: '评分', key: 'selfStudyAnswer', label: '「自学情况」选项', type: 'text', placeholder: '课程学时30%以内' },
 
+      // === 登录/Token ===
       { group: '登录', key: 'token', label: '手动 Token', hint: '留空表示自动从电脑版微信 / 本机浏览器读取；已保存的 Token 不回显，只有填了新内容才会覆盖。', type: 'token', placeholder: '留空自动读取' },
       { group: '登录', key: 'readWeChatToken', label: '自动读取微信 Token', hint: '从电脑版微信的本地存储里取最新 Token。', type: 'bool' },
 
+      // === 浏览器 ===
       { group: '浏览器', key: 'mode', label: '运行方式', hint: 'browser = 真实浏览器点击（推荐）；api = 直接调接口（快，但指纹明显）。', type: 'select', options: [
         { value: 'browser', label: 'browser（真实浏览器）' },
         { value: 'api', label: 'api（直接调接口）' },
@@ -85,9 +89,10 @@ window.__ModuleLoader__.load({
       { group: '浏览器', key: 'useRealViewport', label: '使用真实窗口尺寸', type: 'bool' },
       { group: '浏览器', key: 'seedProfile', label: '同步本机浏览器资料', hint: '复制历史记录和 Cookie，避免「全新空 profile」特征。', type: 'bool' },
 
+      // === 界面 ===
       { group: '界面', key: 'showStatusBar', label: '显示底部状态条', hint: '关掉后聊天输入框下方不再显示「南医大评课助手 · 每天 20:30」。', type: 'bool' },
-      { group: '界面', key: 'systemTask', label: '注册 Windows 计划任务', hint: '打开后即使没开 DSH 也会自动评课，DSH 内的定时器会主动让位，避免同一天跑两遍。计划任务在整点启动，再随机等 runJitterMinutes 分钟（仅 browser 模式）。', type: 'bool' },
 
+      // === 评渠道 ===
       { group: '评渠道', key: 'channel', label: '评课途径', hint: 'wjiaowu = 用微信 Token 浮窗登录（推荐）；zhjw = 用统一身份认证账号密码 + 验证码（备选）；auto = 优先 wjiaowu，失败自动尝试 zhjw。', type: 'select', options: [
         { value: 'wjiaowu', label: 'wjiaowu（微信 Token，推荐）' },
         { value: 'zhjw', label: 'zhjw（账号密码 + 验证码）' },
@@ -104,11 +109,11 @@ window.__ModuleLoader__.load({
     ];
 
     const GROUP_HINT = {
-      运行: '什么时候跑、跑几门、错过了补不补。',
-      评分: '打几星、建议写不写、各道单选题选哪一项。',
+      运行: '什么时候跑、跑几条、错过了补不补。注册 Windows 计划任务后，DSH 关了也会自动评课。',
+      评分: '打几星、建议写不写、各道单选题选哪一项。建议池每行一条，运行时随机抽取。',
       登录: 'Token 一般不用管，插件会自己去电脑版微信里找。',
       浏览器: '看得见的点击比接口调用更难被识别，默认就用浏览器。',
-      界面: '插件在 DSH 界面里露不露面、要不要脱离 DSH 运行。',
+      界面: '插件在 DSH 界面里露不露面。',
       评渠道: '选择用哪个入口评课：wjiaowu 是微信 Token 自动登录，zhjw 是统一身份认证账号密码 + ONNX 验证码，作为备选。',
     };
 
