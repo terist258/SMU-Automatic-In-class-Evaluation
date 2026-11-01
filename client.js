@@ -68,7 +68,7 @@ window.__ModuleLoader__.load({
       { group: '评分', key: 'varyFourStar', label: '四星位置随机', hint: '每节课随机挑哪几道打四星。', type: 'bool' },
       { group: '评分', key: 'fillSuggestion', label: '填写意见建议', hint: '关闭则建议栏一律留空。', type: 'bool' },
       { group: '评分', key: 'suggestionEmptyRate', label: '建议留空比例', hint: '0 到 1，0.35 = 约 35% 的课不写建议。', type: 'number' },
-      { group: '评分', key: 'suggestionPool', label: '建议评语池（每行一条）', hint: '每行写一条建议评语，运行时从中随机抽取一条填写；留空则使用上面固定的建议文本。', type: 'text', placeholder: '按要求完成了学习\n课程内容很有收获\n受益匪浅，推荐给同学' },
+      { group: '评分', key: 'suggestionPool', label: '建议评语池（每行一条）', hint: '每行写一条建议评语，运行时从中随机抽取一条填写；留空则使用上面固定的建议文本。', type: 'textarea', placeholder: '按要求完成了学习\n课程内容很有收获\n受益匪浅，推荐给同学' },
       { group: '评分', key: 'lateAnswer', label: '「是否迟到」选项', hint: '必须和页面上的选项文字完全一致。', type: 'text', placeholder: '否' },
       { group: '评分', key: 'dutyAnswer', label: '「职务」选项', type: 'text', placeholder: '无职务' },
       { group: '评分', key: 'requirementAnswer', label: '「学习要求」选项', type: 'text', placeholder: '按要求完成了学习' },
@@ -315,6 +315,18 @@ window.__ModuleLoader__.load({
           // 原生下拉面板不跟主题变量走；显式给深色字 + 浅色底，免得深色主题下白底白字。
           style: { color: '#1f2328', background: '#ffffff' },
         }, option.label))));
+      }
+
+      if (spec.type === 'textarea') {
+        const shown = draft === undefined ? textOf(spec, value) : draft;
+        return rowShell(spec, h('textarea', {
+          key: 'k',
+          value: shown,
+          disabled,
+          placeholder: spec.placeholder || '',
+          onChange: (event) => setDraft(spec.key, event.target.value),
+          style: { ...inputStyle, height: 120, resize: 'vertical', fontFamily: 'inherit' },
+        }));
       }
 
       const shown = draft === undefined ? textOf(spec, value) : draft;
