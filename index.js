@@ -239,6 +239,12 @@ function syncSystemTasks(config, log) {
   } catch {}
   const state = { enabled: !!config.systemTask, tasks: [], error: "" };
 
+  // 关联：插件已禁用时，强制关闭 Windows 计划任务注册（避免孤儿任务触发后找不到 DSH 服务）
+  if (!config.enabled && config.systemTask) {
+    log("info", "插件已禁用，自动关闭 Windows 计划任务注册");
+    config.systemTask = false;
+  }
+
   if (!config.systemTask) {
     const toDelete = new Set([...known, ...wanted.map(hhmmToTaskName)]);
     for (const name of toDelete) {
@@ -1092,7 +1098,7 @@ export async function apply(ctx, rawConfig = {}) {
     console.log(`[${PLUGIN}] [${level}] ${msg}`);
   };
 
-  // 让系统计划任务跟上配置，并把配置导出给 CLI（失败不影响评课主流程）
+  // 让系统计划任务跟上配置（配置变更时由 syncSystemTasks 处理；插件禁用时由 dispose 钩子清理）
   let systemTaskState = { enabled: !!config.systemTask, tasks: [], error: "" };
   try {
     systemTaskState = syncSystemTasks(config, log);
@@ -1858,7 +1864,40 @@ export async function apply(ctx, rawConfig = {}) {
     log("info", `配置端点已挂载：${WEB_ROUTE}`);
   });
 
+  // 插件被禁用/卸载时，清理 Windows 计划任务，避免孤儿任务触发后找不到 DSH 服务
+  const cleanupSystemTasks = () => {
+    try {
+      const wanted = Array.isArray(config.runTimes) ? config.runTimes : DEFAULT_RUN_TIMES;
+      let known = [];
+      try {
+        const snapshot = JSON.parse(fs.readFileSync(CONFIG_SNAPSHOT, "utf8"));
+        if (snapshot && snapshot.__meta && Array.isArray(snapshot.__meta.systemTasks)) {
+          known = snapshot.__meta.systemTasks;
+        }
+      } catch {}
+      const toDelete = new Set([...known, ...wanted.map(hhmmToTaskName)]);
+      for (const name of toDelete) {
+        try {
+          schtasks(["/Delete", "/F", "/TN", name]);
+          log("info", `已删除计划任务 ${name}`);
+        } catch {
+          // 本来就不存在：忽略
+        }
+      }
+      try {
+        exportConfigSnapshot({ ...config, systemTask: false }, {
+          enabled: false,
+          tasks: [],
+          error: "",
+        });
+      } catch {}
+    } catch (err) {
+      log("warn", `清理计划任务失败：${err && err.message ? err.message : err}`);
+    }
+  };
+
   return () => {
+    cleanupSystemTasks();
     if (scheduleDisposer) scheduleDisposer();
     for (const d of disposers) {
       if (typeof d === "function") d();
