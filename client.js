@@ -99,7 +99,8 @@ window.__ModuleLoader__.load({
         { value: 'auto', label: '自动切换（优先 wjiaowu，失败尝试 zhjw）' },
       ] },
       { group: '评渠道', key: 'zhjwAccount', label: '统一身份认证账号', hint: '学号或工号，与 wjiaowu 同一套账号体系。', type: 'text', placeholder: '学号/工号' },
-      { group: '评渠道', key: 'zhjwPassword', label: '统一身份认证密码', hint: '仅保存在本地配置文件中（Base64 编码，非加密），不上传任何服务器。', type: 'text', placeholder: '密码（仅本地保存）' },
+      { group: '评渠道', key: 'zhjwAccount', label: '统一身份认证账号', hint: '学号或工号，与 wjiaowu 同一套账号体系。', type: 'text', placeholder: '学号/工号' },
+      { group: '评渠道', key: 'zhjwPassword', label: '统一身份认证密码', hint: '本地加密保存，明文不回显。填了新内容才会覆盖旧密码。', type: 'token', placeholder: '留空不改密码' },
       { group: '评渠道', key: 'zhjwMode', label: '登录方式', hint: '浏览器键鼠模拟更真实；纯 HTTP 更快但指纹较弱。', type: 'select', options: [
         { value: 'browser', label: '浏览器键鼠模拟（推荐）' },
         { value: 'http', label: '纯 HTTP 请求' },
@@ -120,6 +121,7 @@ window.__ModuleLoader__.load({
     function textOf(spec, value) {
       if (value === undefined || value === null) return '';
       if (spec.type === 'times') return Array.isArray(value) ? value.join(', ') : String(value);
+      if (spec.type === 'token') return ''; // Token/密码不回明文
       if (typeof value === 'object') return '';
       return String(value);
     }
@@ -278,7 +280,7 @@ window.__ModuleLoader__.load({
     }
 
     function Field(props) {
-      const { spec, values, draft, setDraft, disabled } = props;
+      const { spec, values, draft, setDraft, disabled, tokenConfigured, passwordConfigured } = props;
       const value = values ? values[spec.key] : undefined;
 
       if (spec.type === 'bool') {
@@ -341,7 +343,9 @@ window.__ModuleLoader__.load({
         value: shown,
         disabled,
         inputMode: spec.type === 'number' ? 'decimal' : 'text',
-        placeholder: spec.type === 'token' && value !== undefined && props.tokenConfigured ? '已保存（留空不改）' : (spec.placeholder || ''),
+        placeholder: (spec.type === 'token' && tokenConfigured) || (spec.type === 'token' && passwordConfigured)
+          ? '已保存（留空不改）'
+          : (spec.placeholder || ''),
         onChange: (event) => setDraft(spec.key, event.target.value),
         style: inputStyle,
       }));
@@ -907,6 +911,7 @@ window.__ModuleLoader__.load({
             setDraft,
             disabled: disabled || phase === 'saving',
             tokenConfigured: values.tokenConfigured === true,
+            passwordConfigured: spec.key === 'zhjwPassword' ? (values.zhjwPasswordConfigured === true) : false,
           })),
         ]));
       }

@@ -39,6 +39,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createHash, createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
 /** 本插件目录（run.cmd 里要写绝对路径给计划任务用）。 */
 const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -65,6 +66,47 @@ function ymd(d = new Date()) {
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
+}
+
+/** ---------- zhjw 密码加密保护 ---------- */
+// 本地对称加密：密钥派生自机器特定信息，避免 config.json/patch.yml 里明文密码
+const ENC_PREFIX = "enc:";
+
+function _encKey() {
+  // 用机器名 + 用户主目录派生 32 字节密钥，不同机器/不同用户密钥不同
+  const material = `${os.hostname()}|${os.homedir()}`;
+  return createHash("sha256").update(material).digest();
+}
+
+function encryptPassword(plain) {
+  if (!plain) return "";
+  const key = _encKey();
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return ENC_PREFIX + Buffer.concat([iv, tag, ciphertext]).toString("base64");
+}
+
+function decryptPassword(enc) {
+  if (!enc) return "";
+  if (!enc.startsWith(ENC_PREFIX)) {
+    // 兼容旧的明文/Base64 存储：直接返回（面板会自动加密重写）
+    return enc;
+  }
+  try {
+    const data = Buffer.from(enc.slice(ENC_PREFIX.length), "base64");
+    const iv = data.subarray(0, 12);
+    const tag = data.subarray(12, 28);
+    const ciphertext = data.subarray(28);
+    const key = _encKey();
+    const decipher = createDecipheriv("aes-256-gcm", key, iv);
+    decipher.setAuthTag(tag);
+    const plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    return plain.toString("utf8");
+  } catch {
+    return "";
+  }
 }
 
 // ---------- 与「计划任务 / 结果回执」共用的数据目录 ----------
@@ -943,11 +985,13 @@ function readJsonBody(req) {
   });
 }
 
-/** 面板可读的配置视图：Token 不回明文，只报「是否已配置」。 */
+/** 面板可读的配置视图：Token 和密码不回明文，只报「是否已配置」。 */
 function publicConfig(config) {
   const view = { ...config };
   view.tokenConfigured = typeof config.token === "string" && config.token.trim() !== "";
   view.token = "";
+  view.zhjwPasswordConfigured = typeof config.zhjwPassword === "string" && config.zhjwPassword.trim() !== "";
+  view.zhjwPassword = "";
   return view;
 }
 
@@ -972,6 +1016,10 @@ function sanitizePatch(patch) {
       continue;
     }
     if (typeof value === "string") out[key] = value.slice(0, 4096);
+    // zhjw 密码写入时加密，避免明文落盘
+    if (key === "zhjwPassword" && typeof value === "string" && value.trim() !== "") {
+      out[key] = encryptPassword(value);
+    }
   }
   return out;
 }
@@ -1106,6 +1154,8 @@ export async function apply(ctx, rawConfig = {}) {
   const config = { ...DEFAULTS, ...rawConfig };
   // zhjwEnabled 由 channel 派生：选 zhjw 或 auto 即启用 zhjw 渠道，不再单独暴露复选框
   config.zhjwEnabled = config.channel === "zhjw" || config.channel === "auto";
+  // 解密密码：运行时用明文，配置文件里存密文
+  config.zhjwPassword = decryptPassword(config.zhjwPassword || "");
   const disposers = [];
 
   let state = { lastRun: null, lastResult: null, runCount: 0, tokenInvalid: false, running: false, scanning: false, refreshingToken: false };
