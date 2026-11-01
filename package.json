@@ -1,0 +1,58 @@
+{
+  "name": "@local/smueval-bot",
+  "version": "1.5.1",
+  "private": true,
+  "type": "module",
+  "description": "南方医科大学教学服务平台「随堂评价」每日定时自动完成插件（DeepSeek Harness）",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "playwright",
+    "automation"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "test": "node tools/test-client-apply.mjs"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "browser.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "tools/test-client-apply.mjs",
+    "tools/run-once.mjs",
+    "tools/wechat-token.ps1",
+    "tools/notify.ps1",
+    "tools/inspect-form.mjs",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "dependencies": {
+    "playwright-core": "^1.64.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  }
+}
