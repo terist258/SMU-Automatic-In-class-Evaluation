@@ -587,7 +587,19 @@ function buildAnswers(config, wtList) {
       });
       wtpf += fz;
     } else if (tx === "3") {
-      const txt = config.fillSuggestion === false ? "" : config.suggestion;
+      let txt = "";
+      if (config.fillSuggestion !== false) {
+        const pool = Array.isArray(config.suggestionPool)
+          ? config.suggestionPool
+          : typeof config.suggestionPool === "string"
+            ? config.suggestionPool.split("\n").map((s) => s.trim()).filter(Boolean)
+            : [];
+        if (pool.length > 0) {
+          txt = pool[Math.floor(Math.random() * pool.length)];
+        } else {
+          txt = config.suggestion || "";
+        }
+      }
       const fz = Number(item.zbfz) || 0;
       dt.push({ txdm: item.txdm, zbdm: item.zbdm, zbmc: item.zbmc, fz, dtjg: txt });
       wtpf += fz;
@@ -1071,6 +1083,10 @@ export const Config = z.object({
     .description("（高级）从哪个浏览器 profile 同步，留空自动探测"),
   suggestionFixed: z.boolean().default(false).description("（高级）固定使用下面这句建议"),
   suggestion: z.string().default(DEFAULT_SUGGESTION).description("（高级）固定的建议文本"),
+  suggestionPool: z
+    .string()
+    .default("")
+    .description("（高级）自定义建议评语池，每行一条，运行时随机抽取一条填写；留空则使用上面固定的建议文本"),
   userAgent: z.string().default("").description("（高级）自定义 UA，留空用浏览器真实 UA"),
 });
 
