@@ -99,11 +99,11 @@ window.__ModuleLoader__.load({
         { value: 'auto', label: '自动切换（优先 wjiaowu，失败尝试 zhjw）' },
       ] },
       { group: '评渠道', key: 'zhjwAccount', label: '统一身份认证账号', hint: '学号或工号，与 wjiaowu 同一套账号体系。', type: 'text', placeholder: '学号/工号' },
-      { group: '评渠道', key: 'zhjwAccount', label: '统一身份认证账号', hint: '学号或工号，与 wjiaowu 同一套账号体系。', type: 'text', placeholder: '学号/工号' },
       { group: '评渠道', key: 'zhjwPassword', label: '统一身份认证密码', hint: '本地加密保存，明文不回显。填了新内容才会覆盖旧密码。', type: 'token', placeholder: '留空不改密码' },
-      { group: '评渠道', key: 'zhjwMode', label: '登录方式', hint: '浏览器键鼠模拟更真实；纯 HTTP 更快但指纹较弱。', type: 'select', options: [
-        { value: 'browser', label: '浏览器键鼠模拟（推荐）' },
-        { value: 'http', label: '纯 HTTP 请求' },
+      { group: '评渠道', key: 'zhjwMode', label: 'zhjw 登录方式', hint: '全程键鼠模拟最真实（推荐）；浏览器键鼠登录后页面内 fetch 评课；纯 HTTP 指纹最弱，仅作备选。', type: 'select', options: [
+        { value: 'keyboard-mouse', label: '全程键鼠模拟（推荐，真实点击）' },
+        { value: 'browser', label: '浏览器键鼠登录 + 页面内 fetch 评课' },
+        { value: 'http', label: '纯 HTTP 请求（不推荐）' },
       ] },
       { group: '评渠道', key: 'zhjwMaxAttempts', label: '最大尝试次数', hint: '验证码/登录失败后最多重试几次。', type: 'number', placeholder: '3' },
       { group: '评渠道', key: 'zhjwRetryDelayMinutes', label: '失败重试间隔（分钟）', hint: '验证码或登录失败后等多久再试。', type: 'number', placeholder: '15' },
@@ -282,6 +282,12 @@ window.__ModuleLoader__.load({
     function Field(props) {
       const { spec, values, draft, setDraft, disabled, tokenConfigured, passwordConfigured } = props;
       const value = values ? values[spec.key] : undefined;
+
+      // 渠道与模式联动：
+      // - channel 选 wjiaowu 时，只显示「运行方式」（mode：browser/api），不显示 zhjwMode
+      // - channel 选 zhjw/auto 时，只显示「zhjw 登录方式」（zhjwMode：键鼠/浏览器/纯 HTTP 三种），不显示 mode
+      if (spec.key === 'mode' && values && values.channel && String(values.channel) !== 'wjiaowu') return null;
+      if (spec.key === 'zhjwMode' && values && values.channel && String(values.channel) === 'wjiaowu') return null;
 
       if (spec.type === 'bool') {
         return rowShell(spec, h('label', {
@@ -870,7 +876,9 @@ window.__ModuleLoader__.load({
         )),
       ]));
 
-      // 期末评课程：独立区块，平时不跑，只有学期末手动点
+      // 期末评课程：独立区块，平时不跑，只有学期末手动点；
+      // zhjw 渠道暂不支持期末评课程（目前只做了随堂评），选 zhjw 时隐藏按钮并提示。
+      const isZhjwChannel = values && values.channel ? String(values.channel) === 'zhjw' : false;
       children.push(h('section', {
         key: 'course-box',
         style: {
@@ -883,8 +891,10 @@ window.__ModuleLoader__.load({
       }, [
         h('div', { key: 't', style: { fontSize: 13, fontWeight: 600, color: C.text } }, '期末评课程（手动）'),
         h('div', { key: 'h', style: { fontSize: 12, color: C.faint, marginTop: 2, lineHeight: 1.6 } },
-          '整学期只用一次，学期末开放时点。和每天的随堂评课完全分开，自动流程不会碰它。会把「评课程」里所有未评价的课逐门打满星、按常规选项作答并提交。'),
-        h('div', { key: 'b', style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' } }, [
+          isZhjwChannel
+            ? 'zhjw 渠道暂不支持期末评课程，请将「评课途径」改为 wjiaowu（微信 Token）后再执行期末评课程。'
+            : '整学期只用一次，学期末开放时点。和每天的随堂评课完全分开，自动流程不会碰它。会把「评课程」里所有未评价的课逐门打满星、按常规选项作答并提交。'),
+        isZhjwChannel ? null : h('div', { key: 'b', style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' } }, [
           h('button', {
             key: 'run',
             type: 'button',

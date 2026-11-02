@@ -831,6 +831,10 @@ const DEFAULTS = {
   fourStarCount: 2,
   // 期末评课程一次最多处理多少门（只在手动点按钮时用）
   courseMaxPerRun: 20,
+  // zhjw 期末评课程页面地址（留空则自动探测；自动探测失败时在浏览器打开该页复制地址填入）
+  zhjwCourseUrl: "",
+  // 期末评课程是否全部打五星（满分）；关闭则按 fourStarCount 掺四星
+  courseAllFiveStars: true,
   lateAnswer: "否",
   suggestion: DEFAULT_SUGGESTION,
   fillSuggestion: true,
@@ -867,7 +871,7 @@ const DEFAULTS = {
   zhjwAccount: "",           // 统一身份认证账号
   zhjwPassword: "",          // 统一身份认证密码（本地存储，Base64 编码，非加密）
   zhjwEnabled: false,        // 是否启用 zhjw 渠道（由 channel 自动派生：zhjw/auto 为 true）
-  zhjwMode: "browser",       // "browser"（浏览器键鼠模拟，推荐）| "http"（纯 HTTP）
+  zhjwMode: "keyboard-mouse",   // "keyboard-mouse"（全程键鼠模拟，推荐）| "browser"（浏览器键鼠登录+页面内 fetch）| "http"（纯 HTTP）
   zhjwMaxAttempts: 3,        // 单次运行最大尝试次数（含验证码失败重试）
   zhjwRetryDelayMinutes: 15, // 验证码/登录失败后重试间隔（分钟）
 };
@@ -1396,6 +1400,58 @@ export async function apply(ctx, rawConfig = {}) {
     }
   };
   /**
+   * 期末「评课程」（zhjw 渠道）：走 ZhjwBrowserClient.runCourse()，全程 UI 点击。
+   * 与 wjiaowu 版共用 running 互斥锁。
+   */
+  const runCourseOnceZhjw = async (dryRun) => {
+    if (state.running) {
+      return {
+        ok: false,
+        evaluated: 0,
+        pending: 0,
+        message: "已有评课任务在进行，等它结束再试",
+        details: [],
+        busy: true,
+      };
+    }
+    if (!config.zhjwAccount || !config.zhjwPassword) {
+      return {
+        ok: false,
+        evaluated: 0,
+        pending: 0,
+        message: "zhjw 账号或密码未配置，请在设置中填写统一身份认证账号密码",
+        details: [],
+      };
+    }
+    state.running = true;
+    try {
+      const zhjwLog = (level, msg) => {
+        log(level, `[zhjw-course] ${msg}`);
+        try {
+          ensureDataDir();
+          fs.appendFileSync(
+            RUN_LOG,
+            `[${new Date().toISOString()}] [${level}] [zhjw-course] ${msg}\n`,
+            "utf8"
+          );
+        } catch {}
+      };
+      const client = new ZhjwBrowserClient({
+        account: config.zhjwAccount,
+        password: config.zhjwPassword,
+        log: zhjwLog,
+        config: config,
+      });
+      zhjwLog("info", `开始 zhjw 期末评课程（${dryRun ? "试运行，不提交" : "正式提交"}）`);
+      const result = await client.runCourse({ dryRun: dryRun === true });
+      state.lastCourseRun = nowIso();
+      state.lastCourseResult = result;
+      return result;
+    } finally {
+      state.running = false;
+    }
+  };
+  /**
    * 跑一轮，供「工具 / 配置面板的立即执行 / HTTP 端点」共用。
    * 同一时间只允许跑一次：两个浏览器自动化并发会互相抢 profile 和页面焦点。
    */
@@ -1717,13 +1773,17 @@ export async function apply(ctx, rawConfig = {}) {
           }
 
           // 期末评课程：面板上的「评价课程」按钮调这里，平时自动流程不会碰它。
+          // 按当前 channel 分派：zhjw 走浏览器 UI 点击版；wjiaowu/auto 走微信 Token 版。
           if (req.method === "POST" && url.pathname === `${WEB_ROUTE}/course/evaluate`) {
             if (state.running) {
               return sendJson(res, 409, { ok: false, error: "已有任务在跑，等它结束" });
             }
+            const channel = String(config.channel || "wjiaowu");
             const body = await readJsonBody(req);
             const dryRun = body && body.dryRun === true;
-            const result = await runCourseOnce(dryRun);
+            const result = channel === "zhjw"
+              ? await runCourseOnceZhjw(dryRun)
+              : await runCourseOnce(dryRun);
             return sendJson(res, result.ok ? 200 : 500, {
               ok: !!result.ok,
               data: {
@@ -1793,10 +1853,13 @@ export async function apply(ctx, rawConfig = {}) {
               };
               Promise.resolve()
                 .then(() => {
-                  // 默认用浏览器键鼠模拟（更真实）；body.http=true 可切回纯 HTTP 模式
+                  // body.http=true 纯 HTTP；body.keyboardMouse=true 全程键鼠模拟；否则按 config.zhjwMode / config.mode
                   const useHttp = body && body.http === true;
+                  const useKeyboardMouse = body && body.keyboardMouse === true;
+                  if (useKeyboardMouse) config.zhjwMode = "keyboard-mouse";
+                  else if (useHttp) config.zhjwMode = "http";
                   const ClientClass = useHttp ? ZhjwClient : ZhjwBrowserClient;
-                  zhjwLog("info", `模式：${useHttp ? "纯 HTTP" : "浏览器键鼠模拟"}`);
+                  zhjwLog("info", `模式：${useHttp ? "纯 HTTP" : useKeyboardMouse ? "全程键鼠模拟" : "浏览器键鼠模拟"}`);
                   const client = new ClientClass({
                     account: config.zhjwAccount,
                     password: config.zhjwPassword,
@@ -1858,10 +1921,13 @@ export async function apply(ctx, rawConfig = {}) {
             };
             Promise.resolve()
               .then(() => {
-                // 默认用浏览器键鼠模拟（更真实）；body.http=true 可切回纯 HTTP 模式
+                // body.http=true 纯 HTTP；body.keyboardMouse=true 全程键鼠模拟；否则按 config.zhjwMode / config.mode
                 const useHttp = body && body.http === true;
+                const useKeyboardMouse = body && body.keyboardMouse === true;
+                if (useKeyboardMouse) config.zhjwMode = "keyboard-mouse";
+                else if (useHttp) config.zhjwMode = "http";
                 const ClientClass = useHttp ? ZhjwClient : ZhjwBrowserClient;
-                zhjwLog("info", `模式：${useHttp ? "纯 HTTP" : "浏览器键鼠模拟"}`);
+                zhjwLog("info", `模式：${useHttp ? "纯 HTTP" : useKeyboardMouse ? "全程键鼠模拟" : "浏览器键鼠模拟"}`);
                 const client = new ClientClass({
                   account: config.zhjwAccount,
                   password: config.zhjwPassword,
